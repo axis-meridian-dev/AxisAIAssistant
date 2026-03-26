@@ -38,18 +38,20 @@ async def cli_loop(agent: Agent):
     cfg = agent.config
     console.print(f"[dim]Model: {cfg['llm']['primary_model']}[/dim]")
     console.print(f"[dim]Tools: {', '.join(agent.list_tools())}[/dim]")
-    console.print(f"[dim]Type 'quit' to exit, 'tools' to list capabilities[/dim]\n")
-    
+    console.print(f"[dim]Type 'quit' to exit, 'tools' to list capabilities[/dim]")
+    console.print(f"[dim]Modes: 'mode <research|analysis|argument|write|general>'[/dim]\n")
+
     while True:
         try:
-            user_input = Prompt.ask("[bold green]You[/bold green]")
+            mode_tag = f" [{agent.mode}]" if agent.mode != "general" else ""
+            user_input = Prompt.ask(f"[bold green]You{mode_tag}[/bold green]")
         except (EOFError, KeyboardInterrupt):
             console.print("\n[dim]Goodbye.[/dim]")
             break
-        
+
         if not user_input.strip():
             continue
-        
+
         cmd = user_input.strip().lower()
         if cmd in ("quit", "exit", "q"):
             console.print("[dim]Goodbye.[/dim]")
@@ -64,6 +66,15 @@ async def cli_loop(agent: Agent):
         elif cmd == "model":
             console.print(f"[dim]Primary: {cfg['llm']['primary_model']}[/dim]")
             console.print(f"[dim]Fast:    {cfg['llm']['fast_model']}[/dim]")
+            continue
+        elif cmd.startswith("mode"):
+            parts = cmd.split(maxsplit=1)
+            if len(parts) == 1:
+                console.print(f"[dim]Current mode: {agent.mode}[/dim]")
+                console.print(f"[dim]Available: research, analysis, argument, write, general[/dim]")
+            else:
+                result = agent.set_mode(parts[1])
+                console.print(f"[dim]{result}[/dim]")
             continue
         
         # Process through agent — no spinner so tool calls print in real time
