@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # ============================================================================
-# Knowledge Base Setup — adds RAG capabilities to the local AI assistant
-# Run this AFTER the main setup.sh or after pip installing base dependencies
+# Knowledge Base Setup — adds RAG capabilities
+# Run AFTER setup.sh or after pip installing base dependencies
 # ============================================================================
 set -euo pipefail
 
@@ -21,13 +21,9 @@ if [ -z "${VIRTUAL_ENV:-}" ]; then
 fi
 
 info "Installing knowledge base dependencies..."
+pip install chromadb PyMuPDF watchdog
 
-pip install \
-    chromadb \
-    PyMuPDF \
-    watchdog
-
-# Pull the embedding model via Ollama
+# Pull the embedding model
 info "Pulling embedding model (nomic-embed-text)..."
 if command -v ollama &>/dev/null; then
     ollama pull nomic-embed-text
@@ -35,26 +31,18 @@ else
     warn "Ollama not found. Install it first, then run: ollama pull nomic-embed-text"
 fi
 
-# Create the database directory
+# Create directories
 mkdir -p ~/.local/share/ai-assistant/knowledge_db
+mkdir -p ~/LegalResearch/{federal_statutes,state_statutes,case_law,statistics,news_clips,research_briefs,projects,documents}
 
 echo ""
-info "============================================"
-info "  Knowledge Base ready!"
-info "============================================"
+info "Knowledge Base ready!"
 echo ""
-info "Quick start:"
+info "Quick start (inside the assistant CLI):"
+echo "  > ingest directory ~/Documents"
+echo "  > ingest directory ~/LegalResearch"
+echo "  > what do my files say about [topic]?"
 echo ""
-echo "  # In the assistant CLI, just say:"
-echo "  > ingest my Documents folder"
-echo "  > ingest my projects directory"
-echo "  > what do my notes say about [topic]?"
+echo "  Auto-watch (separate terminal):"
+echo "  python watcher.py ~/Documents ~/LegalResearch"
 echo ""
-echo "  # Or ingest everything at once:"
-echo "  > ingest all files under my home directory"
-echo ""
-echo "  # Auto-watch for changes (separate terminal):"
-echo "  python watcher.py ~/Documents ~/Projects"
-echo ""
-info "The embedding model (nomic-embed-text) is ~275MB and runs on CPU."
-info "ChromaDB stores vectors locally at ~/.local/share/ai-assistant/knowledge_db"

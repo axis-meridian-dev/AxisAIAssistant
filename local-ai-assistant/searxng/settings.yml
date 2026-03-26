@@ -1,0 +1,22 @@
+use_default_settings: true
+server:
+  secret_key: "change_this_to_a_random_string_run_openssl_rand_hex_32"
+  bind_address: "0.0.0.0"
+  port: 8080
+search:
+  formats:
+    - html
+    - json
+engines:
+  - name: google
+    engine: google
+    shortcut: g
+  - name: duckduckgo
+    engine: duckduckgo
+    shortcut: ddg
+  - name: wikipedia
+    engine: wikipedia
+    shortcut: wp
+  - name: github
+    engine: github
+    shortcut: gh
