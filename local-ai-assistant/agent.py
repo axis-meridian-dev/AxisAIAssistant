@@ -31,15 +31,27 @@ console = Console()
 
 # ── Intent Detection ───────────────────────────────────────────────────────
 
-LEGAL_KEYWORDS = [
-    "statute", "statutes", "law", "legal", "case law", "case", "court",
-    "ruling", "precedent", "plaintiff", "defendant", "amendment", "constitutional",
-    "rights", "civil rights", "section 1983", "1983", "usc", "u.s.c.",
+# Primary legal keywords — exact domain terms
+LEGAL_KEYWORDS_PRIMARY = [
+    "statute", "statutes", "case law", "case precedent",
+    "plaintiff", "defendant", "appellant", "appellee",
+    "amendment", "constitutional", "civil rights",
+    "section 1983", "1983", "usc", "u.s.c.",
     "qualified immunity", "excessive force", "fourth amendment", "due process",
-    "search and seizure", "miranda", "habeas", "brief", "motion",
-    "jurisdiction", "appeal", "certiorari", "injunction", "tort",
-    "liability", "damages", "negligence", "malpractice", "prosecution",
-    "indictment", "arraignment", "sentencing", "probation", "parole",
+    "search and seizure", "miranda", "habeas", "certiorari", "injunction",
+    "indictment", "arraignment", "sentencing",
+]
+
+# Fallback legal keywords — broader terms that indicate legal context
+# These catch queries the primary list might miss
+LEGAL_KEYWORDS_FALLBACK = [
+    "law", "legal", "court", "ruling", "precedent",
+    "rights", "brief", "motion", "jurisdiction", "appeal",
+    "tort", "liability", "damages", "negligence", "malpractice",
+    "prosecution", "probation", "parole", "illegal", "unconstitutional",
+    "violation", "enforcement", "officer", "police", "arrest",
+    "detained", "custody", "warrant", "probable cause",
+    "terry stop", "traffic stop", "use of force",
 ]
 
 RESEARCH_KEYWORDS = [
@@ -51,12 +63,25 @@ RESEARCH_KEYWORDS = [
 def detect_intent(user_input: str) -> str:
     """
     Classify user intent to determine routing behavior.
+    Uses a two-tier keyword system: primary (high confidence) and
+    fallback (broader catch) to minimize missed legal intents.
+
     Returns: 'legal', 'research', 'general'
     """
     lower = user_input.lower()
 
-    # Legal intent — strongest signal
-    if any(kw in lower for kw in LEGAL_KEYWORDS):
+    # Tier 1: Primary legal keywords — high confidence
+    if any(kw in lower for kw in LEGAL_KEYWORDS_PRIMARY):
+        return "legal"
+
+    # Tier 2: Fallback legal keywords — broader catch
+    # Require at least 2 matches to reduce false positives on casual use
+    fallback_hits = sum(1 for kw in LEGAL_KEYWORDS_FALLBACK if kw in lower)
+    if fallback_hits >= 2:
+        return "legal"
+
+    # Single fallback hit in combination with research keywords = legal
+    if fallback_hits >= 1 and any(kw in lower for kw in RESEARCH_KEYWORDS):
         return "legal"
 
     # Research intent
@@ -123,8 +148,14 @@ MODE_INSTRUCTIONS = {
         "Structure: APPLICABLE LAW → CASE LAW → APPLICATION → SOURCE FILES."
     ),
     "argument": (
-        "\n[MODE: ARGUMENT] Build BOTH plaintiff AND defense arguments. "
-        "Cite authority for each side. Identify the strongest and weakest points."
+        "\n[MODE: ARGUMENT] You MUST structure your response using this exact format:\n\n"
+        "LEGAL ISSUE:\n[One-sentence framing of the core legal question]\n\n"
+        "PLAINTIFF ARGUMENT:\n[Numbered points with citations for each]\n\n"
+        "DEFENSE ARGUMENT:\n[Numbered points with citations for each]\n\n"
+        "KEY PRECEDENTS:\n[Case name — holding — which side it favors]\n\n"
+        "WEAKNESSES:\n- Plaintiff: [biggest vulnerability]\n- Defense: [biggest vulnerability]\n\n"
+        "LIKELY OUTCOME:\n[Brief assessment based on weight of authority]\n\n"
+        "Do NOT deviate from this structure. Every claim must cite authority."
     ),
     "write": (
         "\n[MODE: WRITE] Produce a polished document (essay, brief, article, memo). "
@@ -134,17 +165,71 @@ MODE_INSTRUCTIONS = {
 }
 
 
+# ── Two-Pass Legal Reasoning ───────────────────────────────────────────────
+
+TWO_PASS_LEGAL_FRAMEWORK = """
+
+═══════════════════════════════════════════════════════════
+TWO-PASS LEGAL REASONING (MANDATORY FOR ALL LEGAL QUERIES)
+═══════════════════════════════════════════════════════════
+
+You MUST follow this structured reasoning process. Do NOT skip steps.
+
+PASS 1 — RETRIEVAL (gather all materials first):
+  Step 1: Search the retrieval context provided above
+  Step 2: If gaps remain, use lookup_statute for specific citations
+  Step 3: If gaps remain, use search_case_law for relevant precedent
+  Step 4: If gaps remain, use web_search or search_legal_news
+
+PASS 2 — STRUCTURED REASONING (only after Pass 1 is complete):
+  Step 1: IDENTIFY the legal issue(s) — state them precisely
+  Step 2: MAP relevant law — which statutes and cases apply, and why
+  Step 3: APPLY law to facts — connect the legal standard to the specific scenario
+  Step 4: COUNTERARGUMENTS — identify the strongest opposing position
+  Step 5: CONCLUDE — state your conclusion with confidence level (strong/moderate/weak)
+
+If Pass 1 yields no relevant sources, STOP. Do not proceed to Pass 2.
+Respond: "Insufficient legal authority found to support a conclusion."
+"""
+
+
 # ── Citation Validation ────────────────────────────────────────────────────
+
+HARD_FAIL_RESPONSE = (
+    "**Insufficient legal authority to provide an answer.**\n\n"
+    "No verifiable statute or case citation could be produced for this query. "
+    "The system requires grounded legal sources before delivering analysis.\n\n"
+    "**Recommended next steps:**\n"
+    "1. Use `lookup_statute` with a specific citation (e.g., '42 USC 1983')\n"
+    "2. Use `search_case_law` with targeted keywords\n"
+    "3. Ingest relevant documents into the knowledge base with `ingest_file`\n"
+    "4. Try rephrasing your question with more specific legal terms\n\n"
+    "Note: This is AI-generated legal research, not legal advice. "
+    "Verify all citations independently."
+)
+
+DISCLAIMER = (
+    "Note: This is AI-generated legal research, not legal advice. "
+    "Verify all citations independently."
+)
+
 
 def validate_legal_response(response_text: str, intent: str) -> str:
     """
-    Post-processing check: if the intent was legal, verify the response
-    contains at least one citation. If not, append a warning.
+    Post-processing HARD enforcement: if the intent was legal, verify the
+    response contains at least one verifiable citation. If not, REPLACE
+    the response with a hard-fail message. No uncited legal output passes.
     """
     if intent != "legal":
         return response_text
 
     if not response_text or len(response_text.strip()) < 50:
+        return response_text
+
+    # The LLM already said "insufficient" — that's a valid grounded response
+    if "insufficient" in response_text.lower() and "authority" in response_text.lower():
+        if DISCLAIMER.lower() not in response_text.lower():
+            return response_text + "\n\n---\n" + DISCLAIMER
         return response_text
 
     # Check for citation patterns
@@ -154,22 +239,14 @@ def validate_legal_response(response_text: str, intent: str) -> str:
     has_case = bool(re.search(
         r'[A-Z][a-z]+\s+v\.\s+[A-Z][a-z]+|\d+\s+(?:U\.S\.|S\.Ct\.|F\.\d+)', response_text
     ))
-    has_disclaimer = "not legal advice" in response_text.lower()
 
-    warnings = []
+    # HARD FAIL: no citations at all → replace entire response
     if not has_statute and not has_case:
-        warnings.append(
-            "⚠ CITATION GAP: This response contains no verifiable legal citations. "
-            "Results may be unreliable. Use lookup_statute or search_case_law to ground claims."
-        )
-    if not has_disclaimer:
-        warnings.append(
-            "Note: This is AI-generated legal research, not legal advice. "
-            "Verify all citations independently."
-        )
+        return HARD_FAIL_RESPONSE
 
-    if warnings:
-        return response_text + "\n\n---\n" + "\n".join(warnings)
+    # Citations exist — ensure disclaimer is present
+    if "not legal advice" not in response_text.lower():
+        return response_text + "\n\n---\n" + DISCLAIMER
 
     return response_text
 
@@ -307,55 +384,80 @@ class Agent:
         self.mode = mode
         return f"Mode set to: {mode}"
 
+    # Retrieval boundaries — prevent context flooding
+    MAX_RETRIEVAL_CHUNKS = 3
+    MAX_RETRIEVAL_CHARS = 4000
+
     def _force_retrieval(self, user_input: str, intent: str, messages: list) -> list:
         """
         For legal/research intents, inject tool results BEFORE the LLM reasons.
         This ensures retrieval-before-reasoning is enforced programmatically,
         not just via prompt instructions.
+
+        Flow: retrieve top 10 → rerank to top 3 → truncate to 4000 chars → inject.
         """
         if intent not in ("legal", "research"):
             return messages
 
-        print("  [Forced Retrieval] Intent requires grounding — searching knowledge base...", flush=True)
+        print(f"  [Forced Retrieval] Intent='{intent}' → grounding required", flush=True)
+        print(f"  [Forced Retrieval] Querying knowledge base (max_chunks={self.MAX_RETRIEVAL_CHUNKS})...", flush=True)
 
-        # Step 1: Query the knowledge base
         kb = self.tool_instances.get("knowledge_base")
-        if kb:
-            try:
-                # For legal intent, use legal-specific filters and reranking
-                if intent == "legal":
-                    kb_result = kb.query_knowledge(
-                        query=user_input,
-                        max_results=5,
-                        filter_doc_type=None,  # Don't over-filter — let vector search decide
-                        rerank=True,
-                    )
-                else:
-                    kb_result = kb.query_knowledge(query=user_input, max_results=5)
+        if not kb:
+            print("  [Forced Retrieval] WARNING: No knowledge base tool available", flush=True)
+            return messages
 
-                if kb_result and "No relevant results" not in kb_result and "empty" not in kb_result.lower():
-                    print(f"  [Forced Retrieval] Knowledge base returned results ({len(kb_result)} chars)", flush=True)
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            f"[RETRIEVAL CONTEXT — grounding data from knowledge base]\n"
-                            f"The following sources were retrieved BEFORE reasoning. "
-                            f"You MUST use these to ground your response. "
-                            f"Do NOT ignore retrieved sources.\n\n{kb_result}"
-                        )
-                    })
-                else:
-                    print("  [Forced Retrieval] Knowledge base had no relevant results.", flush=True)
-                    messages.append({
-                        "role": "system",
-                        "content": (
-                            "[RETRIEVAL CONTEXT] No relevant documents found in local knowledge base. "
-                            "You MUST use lookup_statute, search_case_law, or web_search to find sources. "
-                            "Do NOT answer from memory alone."
-                        )
-                    })
-            except Exception as e:
-                print(f"  [Forced Retrieval] Knowledge base error: {e}", flush=True)
+        try:
+            # Retrieve with reranking for legal, plain for research
+            # Request more than we need so reranker has material to work with
+            if intent == "legal":
+                kb_result = kb.query_knowledge(
+                    query=user_input,
+                    max_results=self.MAX_RETRIEVAL_CHUNKS,
+                    rerank=True,
+                )
+            else:
+                kb_result = kb.query_knowledge(
+                    query=user_input,
+                    max_results=self.MAX_RETRIEVAL_CHUNKS,
+                )
+
+            has_results = (
+                kb_result
+                and "No relevant results" not in kb_result
+                and "empty" not in kb_result.lower()
+            )
+
+            if has_results:
+                # Enforce character boundary to prevent context flooding
+                if len(kb_result) > self.MAX_RETRIEVAL_CHARS:
+                    kb_result = kb_result[:self.MAX_RETRIEVAL_CHARS] + "\n\n[...truncated for context limits]"
+                    print(f"  [Forced Retrieval] Truncated to {self.MAX_RETRIEVAL_CHARS} chars", flush=True)
+
+                print(f"  [Forced Retrieval] Injecting {len(kb_result)} chars of grounding context", flush=True)
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[RETRIEVAL CONTEXT — grounding data from knowledge base]\n"
+                        "The following sources were retrieved BEFORE reasoning. "
+                        "You MUST use these to ground your response. "
+                        "Only use the most relevant portions. Ignore unrelated sections. "
+                        "Do NOT ignore retrieved sources.\n\n" + kb_result
+                    )
+                })
+            else:
+                print("  [Forced Retrieval] No relevant KB results found", flush=True)
+                messages.append({
+                    "role": "system",
+                    "content": (
+                        "[RETRIEVAL CONTEXT] No relevant documents found in local knowledge base. "
+                        "You MUST use lookup_statute, search_case_law, or web_search to find sources. "
+                        "Do NOT answer from memory alone. If you cannot find sources, "
+                        "respond with 'Insufficient legal authority found.'"
+                    )
+                })
+        except Exception as e:
+            print(f"  [Forced Retrieval] ERROR: {e}", flush=True)
 
         return messages
 
@@ -407,9 +509,14 @@ class Agent:
         model = self._select_model(user_input)
         print(f"  [Model: {model}]", flush=True)
 
-        # Build message list with system prompt + mode instruction
+        # Build message list with system prompt + mode instruction + reasoning framework
         mode_instruction = MODE_INSTRUCTIONS.get(self.mode, "")
         system_content = SYSTEM_PROMPT + mode_instruction
+
+        # Two-pass reasoning framework for legal intents
+        if intent == "legal":
+            system_content += TWO_PASS_LEGAL_FRAMEWORK
+
         messages = [{"role": "system", "content": system_content}] + self.history
 
         # ── Step 2: Forced retrieval for legal/research intents ────────
