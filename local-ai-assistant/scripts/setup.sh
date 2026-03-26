@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # ============================================================================
-# LOCAL AI ASSISTANT — Setup Script
-# Installs: Ollama, LLM models, Python deps, SearXNG, system control tools
+# LOCAL AI ASSISTANT — Full Setup Script
+# Installs: System deps, Ollama, LLM models, Python venv + packages,
+#           SearXNG (optional), knowledge base, systemd service
 # Tested on: Ubuntu 22.04+ / Debian 12+ / Fedora 38+
 # ============================================================================
 set -euo pipefail
@@ -17,11 +18,19 @@ error() { echo -e "${RED}[✗]${NC} $1"; }
 
 PROJECT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 
+echo ""
+echo "============================================"
+echo "  LOCAL AI ASSISTANT — Full Setup"
+echo "============================================"
+echo ""
+info "Project directory: $PROJECT_DIR"
+echo ""
+
 # ─── Detect package manager ────────────────────────────────────────────────
 if command -v apt-get &>/dev/null; then
     PKG="apt"
     INSTALL="sudo apt-get install -y"
-    UPDATE="sudo apt-get update"
+    UPDATE="sudo apt-get update --fix-missing"
 elif command -v dnf &>/dev/null; then
     PKG="dnf"
     INSTALL="sudo dnf install -y"
@@ -37,31 +46,33 @@ fi
 
 # ─── System dependencies ───────────────────────────────────────────────────
 info "Installing system dependencies..."
-$UPDATE
+$UPDATE || warn "apt update had errors (mirror sync issue — continuing anyway)"
 
 if [ "$PKG" = "apt" ]; then
     $INSTALL curl wget git python3 python3-pip python3-venv \
-        xdotool wmctrl xclip xdg-utils playerctl \
-        portaudio19-dev libsndfile1 ffmpeg \
-        docker.io docker-compose
+        xdotool wmctrl xclip xdg-utils \
+        portaudio19-dev libsndfile1 ffmpeg scrot espeak \
+        2>/dev/null || warn "Some packages failed — continuing"
 elif [ "$PKG" = "dnf" ]; then
     $INSTALL curl wget git python3 python3-pip \
-        xdotool wmctrl xclip xdg-utils playerctl \
-        portaudio-devel libsndfile ffmpeg \
-        docker docker-compose
+        xdotool wmctrl xclip xdg-utils \
+        portaudio-devel libsndfile ffmpeg scrot espeak \
+        2>/dev/null || warn "Some packages failed — continuing"
 elif [ "$PKG" = "pacman" ]; then
     $INSTALL curl wget git python python-pip \
-        xdotool wmctrl xclip xdg-utils playerctl \
-        portaudio libsndfile ffmpeg \
-        docker docker-compose
+        xdotool wmctrl xclip xdg-utils \
+        portaudio libsndfile ffmpeg scrot espeak \
+        2>/dev/null || warn "Some packages failed — continuing"
 fi
+
+info "System dependencies done."
 
 # ─── Install Ollama ────────────────────────────────────────────────────────
 if ! command -v ollama &>/dev/null; then
     info "Installing Ollama..."
     curl -fsSL https://ollama.ai/install.sh | sh
 else
-    info "Ollama already installed: $(ollama --version)"
+    info "Ollama already installed: $(ollama --version 2>/dev/null || echo 'unknown version')"
 fi
 
 # Start Ollama service
@@ -70,37 +81,50 @@ if systemctl is-active --quiet ollama 2>/dev/null; then
     info "Ollama service already running."
 else
     sudo systemctl enable ollama 2>/dev/null || true
-    sudo systemctl start ollama 2>/dev/null || ollama serve &>/dev/null &
-    sleep 3
+    sudo systemctl start ollama 2>/dev/null || {
+        warn "systemctl failed — starting ollama manually in background"
+        nohup ollama serve &>/dev/null &
+        sleep 3
+    }
 fi
 
 # ─── Pull LLM models ──────────────────────────────────────────────────────
-info "Pulling LLM models (this will take a while on first run)..."
+info "Pulling LLM models..."
 
-# Primary reasoning model — 70B for your 24GB+ setup
-# Uses Q4 quantization to fit in VRAM
-info "Pulling llama3.1:70b (primary model — ~40GB download)..."
-ollama pull llama3.1:70b || {
-    warn "70B model failed — falling back to 8B for now"
-    ollama pull llama3.1:8b
-}
+# Fast model for routing + simple tasks
+info "Pulling llama3.1:8b (~4GB)..."
+ollama pull llama3.1:8b || warn "Failed to pull llama3.1:8b — check connection"
 
-# Fast model for simple tasks (routing, classification)
-info "Pulling llama3.1:8b (fast router model)..."
-ollama pull llama3.1:8b
+# Embedding model for knowledge base
+info "Pulling nomic-embed-text (~275MB)..."
+ollama pull nomic-embed-text || warn "Failed to pull nomic-embed-text"
 
-info "Models ready:"
-ollama list
+echo ""
+info "Models available:"
+ollama list 2>/dev/null || warn "Could not list models"
+echo ""
+
+warn "To pull the full 70B model later (requires 24GB+ VRAM, ~40GB download):"
+echo "  ollama pull llama3.1:70b"
+echo "  Then edit config/settings.json → primary_model to 'llama3.1:70b'"
+echo ""
 
 # ─── Python virtual environment ───────────────────────────────────────────
 info "Setting up Python environment..."
 cd "$PROJECT_DIR"
 
-python3 -m venv .venv
+if [ ! -d ".venv" ]; then
+    python3 -m venv .venv
+    info "Created virtual environment"
+else
+    info "Virtual environment already exists"
+fi
+
 source .venv/bin/activate
 
 pip install --upgrade pip
 
+info "Installing Python packages..."
 pip install \
     ollama \
     httpx \
@@ -115,106 +139,29 @@ pip install \
     pyperclip \
     psutil \
     python-xlib \
-    i3ipc \
-    faster-whisper \
     sounddevice \
     numpy \
-    piper-tts \
-    openwakeword \
+    chromadb \
+    PyMuPDF \
     platformdirs
 
-# ─── SearXNG (self-hosted search) ─────────────────────────────────────────
-info "Setting up SearXNG (local search engine)..."
+info "Python packages installed."
 
-SEARXNG_DIR="$PROJECT_DIR/searxng"
-mkdir -p "$SEARXNG_DIR"
+# ─── Create directory structure ────────────────────────────────────────────
+info "Creating data directories..."
+mkdir -p "$PROJECT_DIR/config"
+mkdir -p ~/.local/share/ai-assistant/knowledge_db
+mkdir -p ~/LegalResearch/{federal_statutes,state_statutes,case_law,statistics,news_clips,research_briefs,projects,documents}
 
-cat > "$SEARXNG_DIR/docker-compose.yml" << 'YAML'
-version: '3.7'
-services:
-  searxng:
-    image: searxng/searxng:latest
-    container_name: searxng
-    ports:
-      - "8888:8080"
-    volumes:
-      - ./settings.yml:/etc/searxng/settings.yml:ro
-    environment:
-      - SEARXNG_BASE_URL=http://localhost:8888/
-    restart: unless-stopped
-YAML
-
-cat > "$SEARXNG_DIR/settings.yml" << 'YAML'
-use_default_settings: true
-server:
-  secret_key: "$(openssl rand -hex 32)"
-  bind_address: "0.0.0.0"
-  port: 8080
-search:
-  formats:
-    - html
-    - json
-engines:
-  - name: google
-    engine: google
-    shortcut: g
-  - name: duckduckgo
-    engine: duckduckgo
-    shortcut: ddg
-  - name: wikipedia
-    engine: wikipedia
-    shortcut: wp
-  - name: github
-    engine: github
-    shortcut: gh
-YAML
-
-# Start SearXNG
-cd "$SEARXNG_DIR"
-sudo docker-compose up -d 2>/dev/null || {
-    warn "Docker not available or failed. Web search will fall back to DuckDuckGo API."
-    warn "To enable SearXNG later: cd $SEARXNG_DIR && docker-compose up -d"
-}
-cd "$PROJECT_DIR"
-
-# ─── Create config ─────────────────────────────────────────────────────────
-info "Creating default config..."
-cat > "$PROJECT_DIR/config/settings.json" << JSON
-{
-    "llm": {
-        "primary_model": "llama3.1:70b",
-        "fast_model": "llama3.1:8b",
-        "ollama_host": "http://localhost:11434",
-        "temperature": 0.3,
-        "context_window": 8192
-    },
-    "search": {
-        "searxng_url": "http://localhost:8888",
-        "fallback_to_ddg": true,
-        "max_results": 5
-    },
-    "voice": {
-        "enabled": false,
-        "wake_word": "computer",
-        "stt_model": "base.en",
-        "tts_voice": "en_US-lessac-medium",
-        "push_to_talk_key": "ctrl+space"
-    },
-    "files": {
-        "allowed_roots": ["~"],
-        "excluded_dirs": [".git", "node_modules", "__pycache__", ".cache"],
-        "max_file_size_mb": 50
-    },
-    "desktop": {
-        "screenshot_enabled": true,
-        "app_launch_enabled": true,
-        "clipboard_enabled": true
+# Copy default config if not present
+if [ ! -f "$PROJECT_DIR/config/settings.json" ]; then
+    cp "$PROJECT_DIR/settings.json" "$PROJECT_DIR/config/settings.json" 2>/dev/null || {
+        warn "settings.json not found in project root — using defaults from config.py"
     }
-}
-JSON
+fi
 
 # ─── Systemd service (optional) ───────────────────────────────────────────
-info "Creating systemd service file (install with: sudo cp ... /etc/systemd/system/)..."
+info "Creating systemd service file..."
 cat > "$PROJECT_DIR/scripts/local-ai-assistant.service" << SERVICE
 [Unit]
 Description=Local AI Assistant
@@ -235,18 +182,29 @@ WantedBy=default.target
 SERVICE
 
 echo ""
-info "============================================"
+echo "============================================"
 info "  Setup complete!"
-info "============================================"
+echo "============================================"
 echo ""
 info "To run the assistant:"
 echo "  cd $PROJECT_DIR"
 echo "  source .venv/bin/activate"
 echo "  python main.py"
 echo ""
+info "To run with voice:"
+echo "  pip install faster-whisper piper-tts openwakeword"
+echo "  python main.py --voice"
+echo ""
+info "To run the file watcher (separate terminal):"
+echo "  source .venv/bin/activate"
+echo "  python watcher.py ~/Documents ~/Desktop ~/LegalResearch"
+echo ""
 info "To install as a service:"
 echo "  sudo cp scripts/local-ai-assistant.service /etc/systemd/system/"
 echo "  sudo systemctl enable --now local-ai-assistant"
 echo ""
-warn "Note: 70B model needs ~40GB disk + 24GB+ VRAM."
-warn "If it's slow, edit config/settings.json → primary_model to 'llama3.1:8b'"
+info "First steps inside the assistant:"
+echo "  > download the civil rights statute collection"
+echo "  > ingest directory ~/LegalResearch"
+echo "  > search case law for excessive force traffic stop"
+echo ""

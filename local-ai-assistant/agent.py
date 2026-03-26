@@ -108,8 +108,8 @@ class Agent:
         self.tool_instances = {
             "file_manager": FileManagerTool(config),
             "web_search": WebSearchTool(config),
-            "desktop_control": DesktopControlTool(config),
-            "system_info": SystemInfoTool(config),
+            # "desktop_control": DesktopControlTool(config),
+            # "system_info": SystemInfoTool(config),
             "knowledge_base": KnowledgeBaseTool(config),
             "legal_research": LegalResearchTool(config),
             "document_writer": DocumentWriterTool(config),
@@ -148,14 +148,16 @@ class Agent:
         self.history.append({"role": "user", "content": user_input})
         
         # Determine which model to use
-        # Use fast model for simple queries, primary for complex ones
         model = self._select_model(user_input)
+        print(f"  [Model: {model}]", flush=True)
         
         messages = [{"role": "system", "content": SYSTEM_PROMPT}] + self.history
         
         # Agent loop — keep going until LLM produces a final text response
         max_iterations = 10
         for i in range(max_iterations):
+            print(f"  [Step {i+1}] Sending to LLM...", flush=True)
+            
             try:
                 response = ollama.chat(
                     model=model,
@@ -168,7 +170,7 @@ class Agent:
                 )
             except Exception as e:
                 error_msg = f"LLM error: {e}"
-                console.print(f"[red]{error_msg}[/red]")
+                print(f"  [ERROR] {error_msg}", flush=True)
                 return error_msg
             
             msg = response["message"]
@@ -176,21 +178,35 @@ class Agent:
             
             # Check if there are tool calls
             if msg.get("tool_calls"):
+                print(f"  [Step {i+1}] LLM wants to call {len(msg['tool_calls'])} tool(s):", flush=True)
+                
                 for tool_call in msg["tool_calls"]:
                     func_name = tool_call["function"]["name"]
                     func_args = tool_call["function"]["arguments"]
                     
-                    console.print(f"  [dim]→ Calling: {func_name}({json.dumps(func_args, default=str)[:100]}...)[/dim]")
+                    # Show what's being called
+                    args_preview = json.dumps(func_args, default=str)
+                    if len(args_preview) > 150:
+                        args_preview = args_preview[:150] + "..."
+                    print(f"    → {func_name}({args_preview})", flush=True)
                     
                     # Execute the tool
                     handler = self.tool_handlers.get(func_name)
                     if handler:
                         try:
                             result = handler(**func_args)
+                            # Show a preview of the result
+                            result_str = str(result)
+                            if len(result_str) > 200:
+                                print(f"    ✓ Got result ({len(result_str)} chars)", flush=True)
+                            else:
+                                print(f"    ✓ {result_str}", flush=True)
                         except Exception as e:
                             result = f"Tool error: {e}"
+                            print(f"    ✗ {result}", flush=True)
                     else:
                         result = f"Unknown tool: {func_name}"
+                        print(f"    ✗ {result}", flush=True)
                     
                     # Add tool result to messages
                     messages.append({
@@ -200,6 +216,7 @@ class Agent:
             else:
                 # No tool calls — this is the final response
                 final = msg.get("content", "")
+                print(f"  [Done] Got final response ({len(final)} chars)", flush=True)
                 self.history.append({"role": "assistant", "content": final})
                 
                 # Trim history to prevent context overflow
@@ -211,12 +228,6 @@ class Agent:
         return "Reached maximum tool iterations. Please try a simpler request."
     
     def _select_model(self, user_input: str) -> str:
-        """Use fast model for simple tasks, primary for complex ones."""
-        simple_patterns = [
-            "what time", "hello", "hi", "hey", "thanks", "thank you",
-            "what's up", "how are you", "clear", "help"
-        ]
-        lower = user_input.lower().strip()
-        if any(lower.startswith(p) or lower == p for p in simple_patterns):
-            return self.config["llm"]["fast_model"]
+        """Always use primary model. Fast model routing disabled 
+        until a larger GPU can handle tool definitions properly."""
         return self.config["llm"]["primary_model"]

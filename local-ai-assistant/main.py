@@ -66,11 +66,12 @@ async def cli_loop(agent: Agent):
             console.print(f"[dim]Fast:    {cfg['llm']['fast_model']}[/dim]")
             continue
         
-        # Process through agent
+        # Process through agent — no spinner so tool calls print in real time
         console.print()
-        with console.status("[bold cyan]Thinking...[/bold cyan]", spinner="dots"):
-            response = await agent.process(user_input)
+        console.print("[bold cyan]Processing...[/bold cyan]")
+        response = await agent.process(user_input)
         
+        console.print()
         console.print(Panel(
             Markdown(response),
             title="[bold cyan]Assistant[/bold cyan]",
