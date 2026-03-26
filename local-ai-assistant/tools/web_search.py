@@ -114,7 +114,7 @@ class WebSearchTool(BaseTool):
     def _ddg_search(self, query: str, max_results: int) -> str:
         """Search using DuckDuckGo (no API key needed)."""
         try:
-            from duckduckgo_search import DDGS
+            from ddgs import DDGS
             
             with DDGS() as ddgs:
                 results = list(ddgs.text(query, max_results=max_results))
