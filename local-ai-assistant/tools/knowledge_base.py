@@ -528,36 +528,43 @@ class KnowledgeBaseTool(BaseTool):
         )
     
     def ingest_file(self, path: str) -> str:
-        """Ingest a single file into the knowledge base."""
+        """Ingest a single file into the knowledge base with full metadata extraction."""
         filepath = Path(path).expanduser().resolve()
-        
+
         if not filepath.exists():
             return f"File not found: {filepath}"
         if not filepath.is_file():
             return f"Not a file: {filepath}"
-        
+
         content = read_file_content(filepath)
         if not content:
             return f"Could not read file (unsupported format or binary): {filepath}"
-        
+
         fhash = file_hash(filepath)
         str_path = str(filepath)
-        
+
         # Remove old version if exists
         if str_path in self.manifest["files"]:
             self._remove_file_chunks(str_path)
-        
-        chunks = chunk_text(content, self.chunk_size, self.chunk_overlap)
-        
+
+        # Detect document type and extract metadata (same as ingest_directory)
+        doc_type = detect_document_type(content, filepath)
+        topics = detect_legal_topics(content)
+        jurisdiction = detect_jurisdiction(content) if doc_type in ("statute", "case_law", "legal_brief") else "n/a"
+        citations_found = extract_citations(content) if doc_type in ("statute", "case_law", "legal_brief") else []
+
+        # Chunk with type awareness
+        chunks = chunk_text(content, self.chunk_size, self.chunk_overlap, doc_type)
+
         ids = []
         documents = []
         metadatas = []
-        
+
         for i, chunk in enumerate(chunks):
             chunk_id = hashlib.md5(
                 f"{str_path}:chunk:{i}:{fhash}".encode()
             ).hexdigest()
-            
+
             ids.append(chunk_id)
             documents.append(chunk)
             metadatas.append({
@@ -568,17 +575,23 @@ class KnowledgeBaseTool(BaseTool):
                 "total_chunks": len(chunks),
                 "file_hash": fhash,
                 "ingested_at": datetime.now().isoformat(),
+                "file_size": filepath.stat().st_size,
+                "directory": str(filepath.parent),
+                "doc_type": doc_type,
+                "topics": ",".join(topics),
+                "jurisdiction": jurisdiction,
+                "citations": ",".join(citations_found[:5]),
             })
-        
+
         embeddings = self._embed(documents)
-        
+
         self.collection.add(
             ids=ids,
             documents=documents,
             embeddings=embeddings,
             metadatas=metadatas,
         )
-        
+
         self.manifest["files"][str_path] = {
             "hash": fhash,
             "chunks": len(chunks),
@@ -588,11 +601,20 @@ class KnowledgeBaseTool(BaseTool):
         self.manifest["stats"]["total_files"] = len(self.manifest["files"])
         self.manifest["stats"]["total_chunks"] = self.collection.count()
         self._save_manifest()
-        
+
+        meta_info = f"  Type: {doc_type}"
+        if topics != ["general"]:
+            meta_info += f"\n  Topics: {', '.join(topics)}"
+        if jurisdiction != "n/a":
+            meta_info += f"\n  Jurisdiction: {jurisdiction}"
+        if citations_found:
+            meta_info += f"\n  Citations found: {len(citations_found)}"
+
         return (
             f"Ingested: {filepath.name}\n"
             f"  Chunks: {len(chunks)}\n"
-            f"  Size: {filepath.stat().st_size} bytes"
+            f"  Size: {filepath.stat().st_size} bytes\n"
+            f"{meta_info}"
         )
     
     def query_knowledge(self, query: str, max_results: int = 5,
