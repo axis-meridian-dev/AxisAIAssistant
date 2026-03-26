@@ -364,7 +364,7 @@ class Agent:
             # "system_info": SystemInfoTool(config),
             "knowledge_base": KnowledgeBaseTool(config),
             "legal_research": LegalResearchTool(config),
-            "document_writer": DocumentWriterTool(config),
+            #"document_writer": DocumentWriterTool(config),
         }
 
         # Build tool definitions for Ollama
