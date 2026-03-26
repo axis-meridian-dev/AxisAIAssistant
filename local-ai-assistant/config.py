@@ -5,7 +5,8 @@ from pathlib import Path
 
 DEFAULT_CONFIG = {
     "llm": {
-        "primary_model": "llama3.1:70b",
+        #"primary_model": "llama3.1:70b",
+        "primary_model": "qwen2.5:14b",
         "fast_model": "llama3.1:8b",
         "ollama_host": "http://localhost:11434",
         "temperature": 0.3,
