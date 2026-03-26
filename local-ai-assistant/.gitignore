@@ -36,3 +36,25 @@ htmlcov/
 .ipynb_checkpoints/
 *.ipynb
 .ipynb
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# Local AI / Vector DB
+.local/
+*.bin
+*.pickle
+*.db
+*.sqlite3
+
+# Chroma
+chroma/
+knowledge_db/
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
