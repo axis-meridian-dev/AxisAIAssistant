@@ -10,7 +10,7 @@ DEFAULT_CONFIG = {
         "fast_model": "llama3.1:8b",
         "ollama_host": "http://localhost:11434",
         "temperature": 0.3,
-        "context_window": 16384
+        "context_window": 8192
     },
     "search": {
         "searxng_url": "http://localhost:8888",
