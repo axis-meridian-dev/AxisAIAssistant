@@ -1,15 +1,15 @@
 {
     "llm": {
-        "primary_model": "qwen2.5:14b",
+        "primary_model": "llama3.1:70b",
         "fast_model": "llama3.1:8b",
         "ollama_host": "http://localhost:11434",
         "temperature": 0.3,
-        "context_window": 8192
+        "context_window": 16384
     },
     "search": {
         "searxng_url": "http://localhost:8888",
         "fallback_to_ddg": true,
-        "max_results": 5
+        "max_results": 10
     },
     "voice": {
         "enabled": false,
@@ -21,7 +21,7 @@
     "files": {
         "allowed_roots": ["~"],
         "excluded_dirs": [".git", "node_modules", "__pycache__", ".cache"],
-        "max_file_size_mb": 50
+        "max_file_size_mb": 100
     },
     "desktop": {
         "screenshot_enabled": true,
@@ -33,7 +33,7 @@
         "chunk_size": 1000,
         "chunk_overlap": 200,
         "embed_model": "nomic-embed-text",
-        "max_results": 5,
+        "max_results": 10,
         "auto_watch_dirs": ["~/Documents", "~/Desktop"]
     }
 }
