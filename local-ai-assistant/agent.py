@@ -8,8 +8,11 @@ Architecture layers:
   1. Intent Detection — classify user input before LLM sees it
   2. Tool Gate — safety tiers control which tools require confirmation
   3. Mode System — stabilizes behavior per task type
-  4. Forced Retrieval — legal/research queries must hit tools before reasoning
-  5. Citation Validation — post-processing check on legal responses
+  4. Forced Retrieval — cascading fallback chain (KB → statutes → case law → web)
+  5. Fact Extraction — structured fact parsing for legal queries
+  6. Two-Pass Reasoning — retrieval then structured analysis
+  7. Citation Validation — hard-fail post-processing check
+  8. Source Trace — transparency layer for debugging and audit
 """
 
 import re
@@ -186,7 +189,25 @@ PASS 2 — STRUCTURED REASONING (only after Pass 1 is complete):
   Step 2: MAP relevant law — which statutes and cases apply, and why
   Step 3: APPLY law to facts — connect the legal standard to the specific scenario
   Step 4: COUNTERARGUMENTS — identify the strongest opposing position
-  Step 5: CONCLUDE — state your conclusion with confidence level (strong/moderate/weak)
+  Step 5: CONCLUDE — state your conclusion using this EXACT format:
+
+CONFIDENCE: High / Medium / Low
+REASONING:
+- Strength of precedent: [strong/moderate/weak — are there on-point SCOTUS/Circuit cases?]
+- Jurisdiction match: [does the authority come from the relevant jurisdiction?]
+- Factual similarity: [how closely do cited cases match the current facts?]
+- Source conflicts: [do any authorities point in different directions?]
+
+PRECEDENT WEIGHTING RULES:
+When multiple cases are available, weight them in this order:
+  1. SCOTUS decisions (highest authority)
+  2. Federal Circuit decisions (from the relevant circuit)
+  3. State Supreme Court decisions
+  4. Federal District / lower court decisions (lowest weight)
+If sources CONFLICT, you MUST:
+  - Note the conflict explicitly
+  - Prioritize the higher court's holding
+  - Explain why the lower court may have diverged
 
 If Pass 1 yields no relevant sources, STOP. Do not proceed to Pass 2.
 Respond: "Insufficient legal authority found to support a conclusion."
@@ -388,78 +409,146 @@ class Agent:
     MAX_RETRIEVAL_CHUNKS = 3
     MAX_RETRIEVAL_CHARS = 4000
 
-    def _force_retrieval(self, user_input: str, intent: str, messages: list) -> list:
+    def _force_retrieval(self, user_input: str, intent: str, messages: list) -> tuple[list, list]:
         """
-        For legal/research intents, inject tool results BEFORE the LLM reasons.
-        This ensures retrieval-before-reasoning is enforced programmatically,
-        not just via prompt instructions.
+        Cascading fallback chain for legal/research intents.
+        Each step only fires if the previous yielded no results.
 
-        Flow: retrieve top 10 → rerank to top 3 → truncate to 4000 chars → inject.
+        Chain: 1. Local KB → 2. Statute lookup → 3. Case law search → 4. Web → 5. Hard fail instruction
+
+        Returns: (messages, retrieval_trace) where retrieval_trace logs each step.
         """
+        trace = []
+
         if intent not in ("legal", "research"):
-            return messages
+            return messages, trace
 
-        print(f"  [Forced Retrieval] Intent='{intent}' → grounding required", flush=True)
-        print(f"  [Forced Retrieval] Querying knowledge base (max_chunks={self.MAX_RETRIEVAL_CHUNKS})...", flush=True)
+        print(f"  [Forced Retrieval] Intent='{intent}' → cascading retrieval chain", flush=True)
+        grounding_context = None
 
+        # ── Step 1: Local Knowledge Base ───────────────────────────────
         kb = self.tool_instances.get("knowledge_base")
-        if not kb:
-            print("  [Forced Retrieval] WARNING: No knowledge base tool available", flush=True)
-            return messages
-
-        try:
-            # Retrieve with reranking for legal, plain for research
-            # Request more than we need so reranker has material to work with
-            if intent == "legal":
+        if kb:
+            print(f"  [Fallback 1/4] Querying knowledge base (max_chunks={self.MAX_RETRIEVAL_CHUNKS})...", flush=True)
+            try:
                 kb_result = kb.query_knowledge(
                     query=user_input,
                     max_results=self.MAX_RETRIEVAL_CHUNKS,
-                    rerank=True,
+                    rerank=(intent == "legal"),
                 )
-            else:
-                kb_result = kb.query_knowledge(
-                    query=user_input,
-                    max_results=self.MAX_RETRIEVAL_CHUNKS,
+                if self._has_valid_results(kb_result):
+                    grounding_context = kb_result
+                    trace.append("knowledge_base: results found")
+                    print(f"  [Fallback 1/4] KB returned results ({len(kb_result)} chars)", flush=True)
+                else:
+                    trace.append("knowledge_base: no results")
+                    print("  [Fallback 1/4] KB empty — escalating", flush=True)
+            except Exception as e:
+                trace.append(f"knowledge_base: error ({e})")
+                print(f"  [Fallback 1/4] KB error: {e}", flush=True)
+
+        # ── Step 2: Statute Lookup (legal only) ────────────────────────
+        if not grounding_context and intent == "legal":
+            legal = self.tool_instances.get("legal_research")
+            if legal and hasattr(legal, 'search_case_law'):
+                print("  [Fallback 2/4] Searching case law via CourtListener...", flush=True)
+                try:
+                    case_result = legal.search_case_law(query=user_input, max_results=3)
+                    if case_result and "error" not in str(case_result).lower() and len(str(case_result)) > 50:
+                        grounding_context = str(case_result)
+                        trace.append("case_law_search: results found")
+                        print(f"  [Fallback 2/4] Case law returned results ({len(grounding_context)} chars)", flush=True)
+                    else:
+                        trace.append("case_law_search: no results")
+                        print("  [Fallback 2/4] Case law empty — escalating", flush=True)
+                except Exception as e:
+                    trace.append(f"case_law_search: error ({e})")
+                    print(f"  [Fallback 2/4] Case law error: {e}", flush=True)
+
+        # ── Step 3: Legal News Search ──────────────────────────────────
+        if not grounding_context and intent == "legal":
+            legal = self.tool_instances.get("legal_research")
+            if legal and hasattr(legal, 'search_legal_news'):
+                print("  [Fallback 3/4] Searching legal news...", flush=True)
+                try:
+                    news_result = legal.search_legal_news(topic=user_input)
+                    if news_result and "error" not in str(news_result).lower() and len(str(news_result)) > 50:
+                        grounding_context = str(news_result)
+                        trace.append("legal_news: results found")
+                        print(f"  [Fallback 3/4] Legal news returned results ({len(grounding_context)} chars)", flush=True)
+                    else:
+                        trace.append("legal_news: no results")
+                        print("  [Fallback 3/4] Legal news empty — escalating", flush=True)
+                except Exception as e:
+                    trace.append(f"legal_news: error ({e})")
+                    print(f"  [Fallback 3/4] Legal news error: {e}", flush=True)
+
+        # ── Step 4: Web Search (last resort) ───────────────────────────
+        if not grounding_context:
+            web = self.tool_instances.get("web_search")
+            if web and hasattr(web, 'web_search'):
+                search_query = f"legal {user_input}" if intent == "legal" else user_input
+                print(f"  [Fallback 4/4] Web search: '{search_query[:60]}...'", flush=True)
+                try:
+                    web_result = web.web_search(query=search_query, max_results=3)
+                    if web_result and "error" not in str(web_result).lower() and len(str(web_result)) > 50:
+                        grounding_context = str(web_result)
+                        trace.append("web_search: results found")
+                        print(f"  [Fallback 4/4] Web returned results ({len(grounding_context)} chars)", flush=True)
+                    else:
+                        trace.append("web_search: no results")
+                        print("  [Fallback 4/4] Web search empty", flush=True)
+                except Exception as e:
+                    trace.append(f"web_search: error ({e})")
+                    print(f"  [Fallback 4/4] Web search error: {e}", flush=True)
+
+        # ── Inject context or hard-fail instruction ────────────────────
+        if grounding_context:
+            # Enforce character boundary
+            if len(grounding_context) > self.MAX_RETRIEVAL_CHARS:
+                grounding_context = grounding_context[:self.MAX_RETRIEVAL_CHARS] + "\n\n[...truncated for context limits]"
+                print(f"  [Forced Retrieval] Truncated to {self.MAX_RETRIEVAL_CHARS} chars", flush=True)
+
+            print(f"  [Forced Retrieval] Injecting {len(grounding_context)} chars of grounding context", flush=True)
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[RETRIEVAL CONTEXT — grounding data retrieved before reasoning]\n"
+                    "The following sources were retrieved BEFORE reasoning. "
+                    "You MUST use these to ground your response. "
+                    "Only use the most relevant portions. Ignore unrelated sections. "
+                    "Do NOT ignore retrieved sources.\n\n" + grounding_context
                 )
+            })
+        else:
+            trace.append("ALL SOURCES EXHAUSTED — no grounding found")
+            print("  [Forced Retrieval] ALL FALLBACKS EXHAUSTED — no grounding data found", flush=True)
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[RETRIEVAL CONTEXT] All retrieval sources exhausted. No relevant documents found in: "
+                    "knowledge base, case law databases, legal news, or web search. "
+                    "You MUST respond with: 'Insufficient legal authority found to support a conclusion. "
+                    "I recommend broadening the search or consulting additional sources.' "
+                    "Do NOT answer from memory. Do NOT fabricate citations."
+                )
+            })
 
-            has_results = (
-                kb_result
-                and "No relevant results" not in kb_result
-                and "empty" not in kb_result.lower()
-            )
+        return messages, trace
 
-            if has_results:
-                # Enforce character boundary to prevent context flooding
-                if len(kb_result) > self.MAX_RETRIEVAL_CHARS:
-                    kb_result = kb_result[:self.MAX_RETRIEVAL_CHARS] + "\n\n[...truncated for context limits]"
-                    print(f"  [Forced Retrieval] Truncated to {self.MAX_RETRIEVAL_CHARS} chars", flush=True)
-
-                print(f"  [Forced Retrieval] Injecting {len(kb_result)} chars of grounding context", flush=True)
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "[RETRIEVAL CONTEXT — grounding data from knowledge base]\n"
-                        "The following sources were retrieved BEFORE reasoning. "
-                        "You MUST use these to ground your response. "
-                        "Only use the most relevant portions. Ignore unrelated sections. "
-                        "Do NOT ignore retrieved sources.\n\n" + kb_result
-                    )
-                })
-            else:
-                print("  [Forced Retrieval] No relevant KB results found", flush=True)
-                messages.append({
-                    "role": "system",
-                    "content": (
-                        "[RETRIEVAL CONTEXT] No relevant documents found in local knowledge base. "
-                        "You MUST use lookup_statute, search_case_law, or web_search to find sources. "
-                        "Do NOT answer from memory alone. If you cannot find sources, "
-                        "respond with 'Insufficient legal authority found.'"
-                    )
-                })
-        except Exception as e:
-            print(f"  [Forced Retrieval] ERROR: {e}", flush=True)
-
-        return messages
+    @staticmethod
+    def _has_valid_results(result) -> bool:
+        """Check if a retrieval result contains usable content."""
+        if not result:
+            return False
+        result_str = str(result)
+        if len(result_str) < 50:
+            return False
+        if "No relevant results" in result_str:
+            return False
+        if "empty" in result_str.lower() and len(result_str) < 100:
+            return False
+        return True
 
     def _gate_tool_call(self, func_name: str) -> tuple[bool, str]:
         """
@@ -483,6 +572,82 @@ class Agent:
             return True, f"[SYSTEM-TIER WARNING] Executing privileged tool: {func_name}"
 
         return True, ""
+
+    def _extract_facts(self, user_input: str, intent: str) -> str | None:
+        """
+        For legal intents, extract structured facts from the user's input
+        before reasoning. This improves consistency and argument quality
+        by giving the LLM a clean fact pattern to work with.
+
+        Returns structured fact block or None if not applicable.
+        """
+        if intent != "legal":
+            return None
+
+        # Only extract facts if the input looks like a scenario (not a pure lookup)
+        lower = user_input.lower()
+        lookup_signals = ["what is", "define", "look up", "find me", "search for", "download"]
+        if any(lower.startswith(s) for s in lookup_signals):
+            return None
+
+        # Check if input has enough substance for fact extraction (scenario-like)
+        if len(user_input) < 80:
+            return None
+
+        print("  [Fact Extraction] Input looks like a scenario — extracting structured facts...", flush=True)
+
+        try:
+            fast_model = self.config.get("llm", {}).get("fast_model", "llama3.1:8b")
+            response = ollama.chat(
+                model=fast_model,
+                messages=[{
+                    "role": "user",
+                    "content": (
+                        "Extract the key legal facts from this scenario. "
+                        "Be precise and brief. Use this EXACT format:\n\n"
+                        "ACTORS: [who is involved — roles, not names if unknown]\n"
+                        "ACTIONS: [what happened — chronological sequence]\n"
+                        "LOCATION/CONTEXT: [where, when, under what circumstances]\n"
+                        "FORCE USED: [type and level, if applicable — or 'N/A']\n"
+                        "RESISTANCE: [level of resistance, if applicable — or 'N/A']\n"
+                        "OUTCOME: [what resulted — injury, arrest, charge, etc.]\n"
+                        "LEGAL CLAIMS: [what legal issues are likely at play]\n\n"
+                        f"Scenario:\n{user_input}"
+                    )
+                }],
+                options={"temperature": 0, "num_ctx": 4096}
+            )
+            facts = response["message"]["content"].strip()
+            if facts and len(facts) > 30:
+                print(f"  [Fact Extraction] Extracted {len(facts)} chars of structured facts", flush=True)
+                return facts
+        except Exception as e:
+            print(f"  [Fact Extraction] Error: {e}", flush=True)
+
+        return None
+
+    @staticmethod
+    def _build_source_trace(retrieval_trace: list, tools_invoked: list) -> str:
+        """
+        Build a transparency block showing which sources and tools were used.
+        Appended to legal responses for audit and debugging.
+        """
+        if not retrieval_trace and not tools_invoked:
+            return ""
+
+        lines = ["\n\n---\n**Source Trace:**"]
+
+        if retrieval_trace:
+            lines.append("Retrieval chain:")
+            for step in retrieval_trace:
+                lines.append(f"  - {step}")
+
+        if tools_invoked:
+            lines.append("Tools invoked:")
+            for tool in tools_invoked:
+                lines.append(f"  - {tool}")
+
+        return "\n".join(lines)
 
     async def process(self, user_input: str) -> str:
         """Process user input through the agent loop."""
@@ -519,10 +684,24 @@ class Agent:
 
         messages = [{"role": "system", "content": system_content}] + self.history
 
+        # ── Step 1.5: Fact extraction for legal scenarios ──────────────
+        extracted_facts = self._extract_facts(user_input, intent)
+        if extracted_facts:
+            messages.append({
+                "role": "system",
+                "content": (
+                    "[STRUCTURED FACTS — extracted from user's scenario]\n"
+                    "Use these structured facts to guide your legal analysis. "
+                    "Do not re-interpret the facts; work from this extraction.\n\n"
+                    + extracted_facts
+                )
+            })
+
         # ── Step 2: Forced retrieval for legal/research intents ────────
-        messages = self._force_retrieval(user_input, intent, messages)
+        messages, retrieval_trace = self._force_retrieval(user_input, intent, messages)
 
         # ── Step 3: Agent loop ─────────────────────────────────────────
+        tools_invoked = []  # Track for source trace
         max_iterations = 10
         for i in range(max_iterations):
             print(f"  [Step {i+1}] Sending to LLM...", flush=True)
@@ -570,6 +749,9 @@ class Agent:
                         args_preview = args_preview[:150] + "..."
                     print(f"    → {func_name}({args_preview})", flush=True)
 
+                    # Track tool usage for source trace
+                    tools_invoked.append(func_name)
+
                     # Execute the tool
                     handler = self.tool_handlers.get(func_name)
                     if handler:
@@ -599,6 +781,12 @@ class Agent:
 
                 # ── Step 4: Citation validation for legal responses ────
                 final = validate_legal_response(final, intent)
+
+                # ── Step 5: Append source trace for legal responses ────
+                if intent == "legal":
+                    source_trace = self._build_source_trace(retrieval_trace, tools_invoked)
+                    if source_trace:
+                        final += source_trace
 
                 print(f"  [Done] Got final response ({len(final)} chars)", flush=True)
                 self.history.append({"role": "assistant", "content": final})

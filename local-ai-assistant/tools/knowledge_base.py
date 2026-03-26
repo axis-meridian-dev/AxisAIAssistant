@@ -177,6 +177,42 @@ def detect_jurisdiction(text: str) -> str:
     return "unknown"
 
 
+def detect_court_level(text: str) -> int:
+    """
+    Detect court level for precedent weighting.
+    Higher = more authoritative.
+      4 = SCOTUS
+      3 = Federal Circuit / State Supreme
+      2 = Federal District / State Appellate
+      1 = Lower courts / unknown
+    """
+    text_lower = text[:3000].lower()
+
+    if any(p in text_lower for p in [
+        "supreme court of the united states", "scotus",
+        "u.s. supreme", "decided by the supreme court"
+    ]):
+        return 4
+
+    if any(p in text_lower for p in [
+        "circuit court", "court of appeals",
+        "first circuit", "second circuit", "third circuit",
+        "fourth circuit", "fifth circuit", "sixth circuit",
+        "seventh circuit", "eighth circuit", "ninth circuit",
+        "tenth circuit", "eleventh circuit", "d.c. circuit",
+        "supreme court of connecticut", "state supreme court",
+    ]):
+        return 3
+
+    if any(p in text_lower for p in [
+        "district court", "u.s. district",
+        "appellate court", "court of appeals of",
+    ]):
+        return 2
+
+    return 1
+
+
 def extract_citations(text: str) -> list[str]:
     """Extract legal citations from text."""
     citations = []
@@ -445,8 +481,10 @@ class KnowledgeBaseTool(BaseTool):
                 # Detect document type for smart chunking
                 doc_type = detect_document_type(content, filepath)
                 topics = detect_legal_topics(content)
-                jurisdiction = detect_jurisdiction(content) if doc_type in ("statute", "case_law", "legal_brief") else "n/a"
-                citations_found = extract_citations(content) if doc_type in ("statute", "case_law", "legal_brief") else []
+                is_legal = doc_type in ("statute", "case_law", "legal_brief")
+                jurisdiction = detect_jurisdiction(content) if is_legal else "n/a"
+                citations_found = extract_citations(content) if is_legal else []
+                court_level = detect_court_level(content) if doc_type == "case_law" else 0
                 
                 # Chunk with type awareness
                 chunks = chunk_text(content, self.chunk_size, self.chunk_overlap, doc_type)
@@ -477,6 +515,7 @@ class KnowledgeBaseTool(BaseTool):
                         "topics": ",".join(topics),
                         "jurisdiction": jurisdiction,
                         "citations": ",".join(citations_found[:5]),
+                        "court_level": court_level,
                     })
                 
                 # Embed and store
@@ -550,8 +589,10 @@ class KnowledgeBaseTool(BaseTool):
         # Detect document type and extract metadata (same as ingest_directory)
         doc_type = detect_document_type(content, filepath)
         topics = detect_legal_topics(content)
-        jurisdiction = detect_jurisdiction(content) if doc_type in ("statute", "case_law", "legal_brief") else "n/a"
-        citations_found = extract_citations(content) if doc_type in ("statute", "case_law", "legal_brief") else []
+        is_legal = doc_type in ("statute", "case_law", "legal_brief")
+        jurisdiction = detect_jurisdiction(content) if is_legal else "n/a"
+        citations_found = extract_citations(content) if is_legal else []
+        court_level = detect_court_level(content) if doc_type == "case_law" else 0
 
         # Chunk with type awareness
         chunks = chunk_text(content, self.chunk_size, self.chunk_overlap, doc_type)
@@ -581,6 +622,7 @@ class KnowledgeBaseTool(BaseTool):
                 "topics": ",".join(topics),
                 "jurisdiction": jurisdiction,
                 "citations": ",".join(citations_found[:5]),
+                "court_level": court_level,
             })
 
         embeddings = self._embed(documents)
@@ -706,14 +748,20 @@ class KnowledgeBaseTool(BaseTool):
             jurisdiction = meta.get("jurisdiction", "")
             citations = meta.get("citations", "")
             
+            court_level = meta.get("court_level", 0)
+            court_labels = {4: "SCOTUS", 3: "Circuit/State Supreme", 2: "District/Appellate", 1: "Lower", 0: "N/A"}
+            court_label = court_labels.get(court_level, "N/A")
+
             header = f"── Result {i+1} (similarity: {similarity:.2%}, type: {doc_type}) ──"
             meta_line = f"Source: {meta.get('source', 'unknown')} (chunk {chunk_idx}/{total})"
-            
+
             tag_parts = []
             if topics and topics != "general":
                 tag_parts.append(f"Topics: {topics}")
             if jurisdiction and jurisdiction != "n/a" and jurisdiction != "unknown":
                 tag_parts.append(f"Jurisdiction: {jurisdiction}")
+            if court_level > 0:
+                tag_parts.append(f"Court: {court_label} (level {court_level}/4)")
             if citations:
                 tag_parts.append(f"Citations: {citations}")
             tag_line = " | ".join(tag_parts)
