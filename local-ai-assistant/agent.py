@@ -401,19 +401,33 @@ CONFIDENCE_MISSING_ADDENDUM = (
 )
 
 
-def validate_legal_response(response_text: str, intent: str) -> str:
+def validate_legal_response(response, intent: str) -> str:
     """
     Post-processing HARD enforcement for legal responses:
-    1. Citation check — no citations → hard fail (replace response)
-    2. Confidence check — no confidence block → append warning
-    3. Disclaimer check — ensure present
-    4. Output sanitization — strip leaked tool JSON
+    1. Normalize input (handle str, dict, None, or other types)
+    2. Citation check — no citations → hard fail (replace response)
+    3. Confidence check — no confidence block → append warning
+    4. Disclaimer check — ensure present
+    5. Output sanitization — strip leaked tool JSON
     """
+    # ── Normalize input type ───────────────────────────────────────
+    response_text = None
+    if isinstance(response, str):
+        response_text = response
+    elif isinstance(response, dict):
+        response_text = response.get("content", "") or ""
+    elif response is None:
+        response_text = ""
+    else:
+        response_text = str(response)
+
+    # ── Non-legal intent: just sanitize and return ─────────────────
     if intent != "legal":
         return sanitize_output(response_text)
 
+    # ── Guard clause: empty or trivially short ─────────────────────
     if not response_text or len(response_text.strip()) < 50:
-        return sanitize_output(response_text)
+        return sanitize_output(response_text) if response_text else ""
 
     # Sanitize first — remove any leaked tool JSON
     response_text = sanitize_output(response_text)
@@ -985,7 +999,10 @@ class Agent:
                     })
             else:
                 # No tool calls — this is the final response
-                final = msg.get("content", "")
+                # Guard: Ollama can return None for content even with default
+                final = msg.get("content") or ""
+                if not isinstance(final, str):
+                    final = str(final)
 
                 # ── Step 5: Citation + confidence validation ───────────
                 final = validate_legal_response(final, intent)
