@@ -61,7 +61,7 @@ async def cli_loop(agent: Agent):
             continue
         elif cmd == "clear":
             agent.clear_history()
-            console.print("[dim]Conversation cleared.[/dim]")
+            console.print("[dim]Conversation cleared. Legal lock released. Mode reset to general.[/dim]")
             continue
         elif cmd == "model":
             console.print(f"[dim]Primary: {cfg['llm']['primary_model']}[/dim]")
