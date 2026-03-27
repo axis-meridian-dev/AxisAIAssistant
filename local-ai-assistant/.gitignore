@@ -58,3 +58,12 @@ Thumbs.db
 
 # Logs
 *.log
+.venv/
+.local/
+knowledge_db/
+chroma/
+*.bin
+*.pickle
+*.db
+
+/~/.local/share/ai-assistant/knowledge_db/chroma/*.zip
