@@ -293,24 +293,11 @@ MODE_INSTRUCTIONS = {
     "argument": (
         "\n[MODE: ARGUMENT] You MUST structure your response using this exact format:\n\n"
         "LEGAL ISSUE:\n[One-sentence framing of the core legal question]\n\n"
-        "FORCE SEVERITY CHECK:\n[minimal / moderate / deadly, with one-sentence justification]\n\n"
         "PLAINTIFF ARGUMENT:\n[Numbered points with citations for each]\n\n"
         "DEFENSE ARGUMENT:\n[Numbered points with citations for each]\n\n"
-        "KEY PRECEDENTS:\n"
-        "- Include at least 1 controlling SCOTUS precedent\n"
-        "- Include at least 1 supporting circuit/lower-court precedent\n"
-        "- Weight precedent by authority (SCOTUS > circuit > lower court)\n"
-        "- Only include deadly-force cases (e.g., Tennessee v. Garner) when facts involve deadly force\n\n"
+        "KEY PRECEDENTS:\n[Case name — holding — which side it favors]\n\n"
         "WEAKNESSES:\n- Plaintiff: [biggest vulnerability]\n- Defense: [biggest vulnerability]\n\n"
         "LIKELY OUTCOME:\n[Brief assessment based on weight of authority]\n\n"
-        "CONFIDENCE: [High / Medium / Low]\n"
-        "REASON: [One to three sentences tied to precedent strength + factual ambiguity]\n\n"
-        "DOCTRINE SCOPE RULE:\n"
-        "- Only include legal doctrines that directly apply to the fact pattern.\n"
-        "- For force during a stop/arrest, analyze under the Fourth Amendment and Graham v. Connor.\n"
-        "- Do not introduce unrelated amendments or causes of action unless facts require them.\n\n"
-        "DEFENSE QUALITY RULE:\n"
-        "- Defense must be realistic and steelmanned (officer-safety, uncertainty, split-second context), never a placeholder.\n\n"
         "Do NOT deviate from this structure. Every claim must cite authority."
     ),
     "write": (
@@ -414,19 +401,33 @@ CONFIDENCE_MISSING_ADDENDUM = (
 )
 
 
-def validate_legal_response(response, intent, mode=None):
+def validate_legal_response(response, intent: str) -> str:
     """
     Post-processing HARD enforcement for legal responses:
-    1. Citation check — no citations → hard fail (replace response)
-    2. Confidence check — no confidence block → append warning
-    3. Disclaimer check — ensure present
-    4. Output sanitization — strip leaked tool JSON
+    1. Normalize input (handle str, dict, None, or other types)
+    2. Citation check — no citations → hard fail (replace response)
+    3. Confidence check — no confidence block → append warning
+    4. Disclaimer check — ensure present
+    5. Output sanitization — strip leaked tool JSON
     """
+    # ── Normalize input type ───────────────────────────────────────
+    response_text = None
+    if isinstance(response, str):
+        response_text = response
+    elif isinstance(response, dict):
+        response_text = response.get("content", "") or ""
+    elif response is None:
+        response_text = ""
+    else:
+        response_text = str(response)
+
+    # ── Non-legal intent: just sanitize and return ─────────────────
     if intent != "legal":
         return sanitize_output(response_text)
 
+    # ── Guard clause: empty or trivially short ─────────────────────
     if not response_text or len(response_text.strip()) < 50:
-        return sanitize_output(response_text)
+        return sanitize_output(response_text) if response_text else ""
 
     # Sanitize first — remove any leaked tool JSON
     response_text = sanitize_output(response_text)
@@ -457,21 +458,6 @@ def validate_legal_response(response, intent, mode=None):
         response_text += CONFIDENCE_MISSING_ADDENDUM
 
     # Ensure disclaimer is present
-    # Citations exist — ensure disclaimer is present
-    if mode == "argument":
-        missing = []
-        if "confidence:" not in response_text.lower():
-            missing.append("CONFIDENCE")
-        if "reason:" not in response_text.lower():
-            missing.append("REASON")
-        if missing:
-            return (
-                "**Output validation failed.**\n\n"
-                f"Missing required section(s) for argument mode: {', '.join(missing)}.\n"
-                "Regenerate with all required sections and legal citations.\n\n"
-                + DISCLAIMER
-            )
-
     if "not legal advice" not in response_text.lower():
         response_text += "\n\n---\n" + DISCLAIMER
 
@@ -1013,10 +999,13 @@ class Agent:
                     })
             else:
                 # No tool calls — this is the final response
-                final = msg.get("content", "")
+                # Guard: Ollama can return None for content even with default
+                final = msg.get("content") or ""
+                if not isinstance(final, str):
+                    final = str(final)
 
-                # ── Step 4: Citation validation for legal responses ────
-                final = validate_legal_response(final, intent, self.mode)
+                # ── Step 5: Citation + confidence validation ───────────
+                final = validate_legal_response(final, intent)
 
                 # ── Step 6: Append source trace for legal responses ────
                 if intent == "legal":
