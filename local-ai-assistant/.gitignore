@@ -65,3 +65,5 @@ chroma/
 *.bin
 *.pickle
 *.db
+
+/~/.local/share/ai-assistant/knowledge_db/chroma/
