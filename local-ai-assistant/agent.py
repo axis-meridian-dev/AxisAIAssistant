@@ -293,11 +293,24 @@ MODE_INSTRUCTIONS = {
     "argument": (
         "\n[MODE: ARGUMENT] You MUST structure your response using this exact format:\n\n"
         "LEGAL ISSUE:\n[One-sentence framing of the core legal question]\n\n"
+        "FORCE SEVERITY CHECK:\n[minimal / moderate / deadly, with one-sentence justification]\n\n"
         "PLAINTIFF ARGUMENT:\n[Numbered points with citations for each]\n\n"
         "DEFENSE ARGUMENT:\n[Numbered points with citations for each]\n\n"
-        "KEY PRECEDENTS:\n[Case name — holding — which side it favors]\n\n"
+        "KEY PRECEDENTS:\n"
+        "- Include at least 1 controlling SCOTUS precedent\n"
+        "- Include at least 1 supporting circuit/lower-court precedent\n"
+        "- Weight precedent by authority (SCOTUS > circuit > lower court)\n"
+        "- Only include deadly-force cases (e.g., Tennessee v. Garner) when facts involve deadly force\n\n"
         "WEAKNESSES:\n- Plaintiff: [biggest vulnerability]\n- Defense: [biggest vulnerability]\n\n"
         "LIKELY OUTCOME:\n[Brief assessment based on weight of authority]\n\n"
+        "CONFIDENCE: [High / Medium / Low]\n"
+        "REASON: [One to three sentences tied to precedent strength + factual ambiguity]\n\n"
+        "DOCTRINE SCOPE RULE:\n"
+        "- Only include legal doctrines that directly apply to the fact pattern.\n"
+        "- For force during a stop/arrest, analyze under the Fourth Amendment and Graham v. Connor.\n"
+        "- Do not introduce unrelated amendments or causes of action unless facts require them.\n\n"
+        "DEFENSE QUALITY RULE:\n"
+        "- Defense must be realistic and steelmanned (officer-safety, uncertainty, split-second context), never a placeholder.\n\n"
         "Do NOT deviate from this structure. Every claim must cite authority."
     ),
     "write": (
@@ -402,6 +415,7 @@ CONFIDENCE_MISSING_ADDENDUM = (
 
 
 def validate_legal_response(response_text: str, intent: str) -> str:
+def validate_legal_response(response_text: str, intent: str, mode: str = "general") -> str:
     """
     Post-processing HARD enforcement for legal responses:
     1. Citation check — no citations → hard fail (replace response)
@@ -444,6 +458,21 @@ def validate_legal_response(response_text: str, intent: str) -> str:
         response_text += CONFIDENCE_MISSING_ADDENDUM
 
     # Ensure disclaimer is present
+    # Citations exist — ensure disclaimer is present
+    if mode == "argument":
+        missing = []
+        if "confidence:" not in response_text.lower():
+            missing.append("CONFIDENCE")
+        if "reason:" not in response_text.lower():
+            missing.append("REASON")
+        if missing:
+            return (
+                "**Output validation failed.**\n\n"
+                f"Missing required section(s) for argument mode: {', '.join(missing)}.\n"
+                "Regenerate with all required sections and legal citations.\n\n"
+                + DISCLAIMER
+            )
+
     if "not legal advice" not in response_text.lower():
         response_text += "\n\n---\n" + DISCLAIMER
 
@@ -987,8 +1016,8 @@ class Agent:
                 # No tool calls — this is the final response
                 final = msg.get("content", "")
 
-                # ── Step 5: Citation + confidence validation ───────────
-                final = validate_legal_response(final, intent)
+                # ── Step 4: Citation validation for legal responses ────
+                final = validate_legal_response(final, intent, self.mode)
 
                 # ── Step 6: Append source trace for legal responses ────
                 if intent == "legal":
