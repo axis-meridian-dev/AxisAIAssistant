@@ -415,7 +415,6 @@ CONFIDENCE_MISSING_ADDENDUM = (
 
 
 def validate_legal_response(response_text: str, intent: str) -> str:
-def validate_legal_response(response_text: str, intent: str, mode: str = "general") -> str:
     """
     Post-processing HARD enforcement for legal responses:
     1. Citation check — no citations → hard fail (replace response)
