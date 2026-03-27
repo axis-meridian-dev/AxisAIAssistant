@@ -19,8 +19,15 @@
         "push_to_talk_key": "ctrl+space"
     },
     "files": {
-        "allowed_roots": ["~"],
-        "excluded_dirs": [".git", "node_modules", "__pycache__", ".cache"],
+        "allowed_roots": [
+            "~"
+        ],
+        "excluded_dirs": [
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".cache"
+        ],
         "max_file_size_mb": 50
     },
     "desktop": {
@@ -34,6 +41,12 @@
         "chunk_overlap": 200,
         "embed_model": "nomic-embed-text",
         "max_results": 5,
-        "auto_watch_dirs": ["~/Documents", "~/Desktop"]
+        "auto_watch_dirs": [
+            "~/Documents",
+            "~/Desktop"
+        ]
+    },
+    "enabled_tools": {
+        "document_writer": true
     }
 }
