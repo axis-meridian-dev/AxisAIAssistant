@@ -5,14 +5,16 @@ Uses Ollama's tool-calling API to let the LLM decide which tools to invoke.
 Runs a loop: LLM → tool call → result → LLM → ... until final answer.
 
 Architecture layers:
-  1. Intent Detection — classify user input before LLM sees it
+  1. Intent Detection — classify user input, with context-aware inheritance
   2. Tool Gate — safety tiers control which tools require confirmation
-  3. Mode System — stabilizes behavior per task type
+  3. Mode System — stabilizes behavior per task type (sticky for legal)
   4. Forced Retrieval — cascading fallback chain (KB → statutes → case law → web)
-  5. Fact Extraction — structured fact parsing for legal queries
-  6. Two-Pass Reasoning — retrieval then structured analysis
-  7. Citation Validation — hard-fail post-processing check
-  8. Source Trace — transparency layer for debugging and audit
+  5. Anchor Precedent Injection — mandatory cases for recognized legal patterns
+  6. Fact Extraction — structured fact parsing for legal scenarios
+  7. Two-Pass Reasoning — retrieval then structured analysis with fact-to-law mapping
+  8. Citation + Confidence Validation — hard-fail post-processing check
+  9. Output Sanitization — strip raw tool JSON from final response
+  10. Source Trace — transparency layer for debugging and audit
 """
 
 import re
@@ -46,7 +48,6 @@ LEGAL_KEYWORDS_PRIMARY = [
 ]
 
 # Fallback legal keywords — broader terms that indicate legal context
-# These catch queries the primary list might miss
 LEGAL_KEYWORDS_FALLBACK = [
     "law", "legal", "court", "ruling", "precedent",
     "rights", "brief", "motion", "jurisdiction", "appeal",
@@ -62,12 +63,29 @@ RESEARCH_KEYWORDS = [
     "data on", "studies", "evidence", "sources", "articles about",
 ]
 
+# Follow-up phrases that indicate the user is continuing the previous topic
+FOLLOWUP_PHRASES = [
+    "same scenario", "same case", "same situation", "same facts",
+    "what if", "now assume", "now suppose", "instead",
+    "but what if", "but now", "but assume", "but instead",
+    "change the facts", "modify the scenario", "alternatively",
+    "in that case", "given that", "under those",
+    "how would that change", "would that affect",
+    "what about", "and if",
+]
 
-def detect_intent(user_input: str) -> str:
+
+def is_followup(user_input: str) -> bool:
+    """Detect if the user's input is a follow-up to the previous topic."""
+    lower = user_input.lower()
+    return any(phrase in lower for phrase in FOLLOWUP_PHRASES)
+
+
+def detect_intent(user_input: str, last_intent: str = "general") -> str:
     """
     Classify user intent to determine routing behavior.
-    Uses a two-tier keyword system: primary (high confidence) and
-    fallback (broader catch) to minimize missed legal intents.
+    Uses a two-tier keyword system with context-aware inheritance:
+    if the input is a follow-up and no new intent is detected, inherit last_intent.
 
     Returns: 'legal', 'research', 'general'
     """
@@ -78,7 +96,6 @@ def detect_intent(user_input: str) -> str:
         return "legal"
 
     # Tier 2: Fallback legal keywords — broader catch
-    # Require at least 2 matches to reduce false positives on casual use
     fallback_hits = sum(1 for kw in LEGAL_KEYWORDS_FALLBACK if kw in lower)
     if fallback_hits >= 2:
         return "legal"
@@ -91,7 +108,130 @@ def detect_intent(user_input: str) -> str:
     if any(kw in lower for kw in RESEARCH_KEYWORDS):
         return "research"
 
+    # Context-aware inheritance: follow-up queries inherit previous intent
+    if is_followup(lower) and last_intent in ("legal", "research"):
+        return last_intent
+
     return "general"
+
+
+# ── Anchor Precedents ─────────────────────────────────────────────────────
+# Mandatory cases that MUST be included for recognized legal patterns.
+# These are injected into the system prompt when the pattern is detected.
+
+ANCHOR_PRECEDENTS = {
+    "excessive_force": {
+        "trigger_keywords": [
+            "excessive force", "use of force", "police force", "officer force",
+            "physical force", "restrain", "taser", "chokehold", "brutality",
+        ],
+        "cases": [
+            "Graham v. Connor, 490 U.S. 386 (1989) — The controlling standard for excessive force claims under the Fourth Amendment. Force must be judged by 'objective reasonableness' considering: (1) severity of the crime, (2) whether the suspect poses an immediate threat, (3) whether the suspect is actively resisting or attempting to flee.",
+        ],
+        "statutes": [
+            "42 U.S.C. § 1983 — Civil action for deprivation of rights under color of law.",
+        ],
+        "force_classification": (
+            "FORCE SEVERITY CLASSIFICATION (you MUST identify which applies):\n"
+            "  - MINIMAL: verbal commands, handcuffing a compliant suspect\n"
+            "  - MODERATE: takedowns, strikes, OC spray, control holds\n"
+            "  - SERIOUS: Taser, baton strikes, K-9 deployment\n"
+            "  - DEADLY: firearm, chokehold, vehicle ramming\n"
+            "Only cite Tennessee v. Garner if DEADLY force is at issue.\n"
+            "Only cite Graham v. Connor factors — do NOT introduce unrelated constitutional amendments "
+            "(e.g., do NOT use 14th Amendment substantive due process for a seizure/stop scenario)."
+        ),
+    },
+    "qualified_immunity": {
+        "trigger_keywords": [
+            "qualified immunity", "clearly established",
+        ],
+        "cases": [
+            "Harlow v. Fitzgerald, 457 U.S. 800 (1982) — Established the qualified immunity defense: officials are shielded unless their conduct violates 'clearly established' law.",
+            "Ashcroft v. al-Kidd, 563 U.S. 731 (2011) — The right must be clearly established at the time of the challenged conduct, with sufficient specificity.",
+        ],
+        "statutes": [],
+        "force_classification": None,
+    },
+    "search_seizure": {
+        "trigger_keywords": [
+            "search and seizure", "warrantless search", "terry stop",
+            "probable cause", "reasonable suspicion",
+        ],
+        "cases": [
+            "Terry v. Ohio, 392 U.S. 1 (1968) — Police may conduct a brief stop if they have reasonable suspicion of criminal activity. Pat-down permitted if officer reasonably believes suspect is armed.",
+            "Mapp v. Ohio, 367 U.S. 643 (1961) — Evidence obtained in violation of the Fourth Amendment is inadmissible (exclusionary rule).",
+        ],
+        "statutes": [],
+        "force_classification": None,
+    },
+}
+
+
+def detect_anchor_precedents(user_input: str) -> list[dict]:
+    """Detect which anchor precedent sets should be injected based on input."""
+    lower = user_input.lower()
+    matched = []
+    for pattern_name, pattern_data in ANCHOR_PRECEDENTS.items():
+        if any(kw in lower for kw in pattern_data["trigger_keywords"]):
+            matched.append(pattern_data)
+    return matched
+
+
+def build_anchor_injection(anchors: list[dict]) -> str:
+    """Build the anchor precedent injection block for the system prompt."""
+    if not anchors:
+        return ""
+
+    lines = [
+        "\n═══════════════════════════════════════════════════════════",
+        "MANDATORY ANCHOR PRECEDENTS (MUST INCLUDE IN YOUR RESPONSE)",
+        "═══════════════════════════════════════════════════════════\n",
+    ]
+
+    for anchor in anchors:
+        if anchor["cases"]:
+            lines.append("CONTROLLING CASES (you MUST cite these):")
+            for case in anchor["cases"]:
+                lines.append(f"  - {case}")
+
+        if anchor["statutes"]:
+            lines.append("CONTROLLING STATUTES:")
+            for statute in anchor["statutes"]:
+                lines.append(f"  - {statute}")
+
+        if anchor.get("force_classification"):
+            lines.append(f"\n{anchor['force_classification']}")
+
+    lines.append(
+        "\nYou MUST include at least ONE of the above cases in your response. "
+        "You MUST include at least ONE supporting circuit-level or lower court case. "
+        "Do NOT rely solely on the anchor precedents — supplement with jurisdiction-specific authority."
+    )
+
+    return "\n".join(lines)
+
+
+# ── Output Sanitization ───────────────────────────────────────────────────
+
+def sanitize_output(text: str) -> str:
+    """
+    Strip raw tool call JSON that leaks into LLM output.
+    Some models emit tool-call-like JSON blocks in their text responses.
+    """
+    # Remove JSON blocks that look like tool calls: {"name": "...", "arguments": ...}
+    text = re.sub(
+        r'\{\s*"name"\s*:\s*"[^"]+"\s*,\s*"(?:arguments|parameters)"\s*:\s*\{[^}]*\}\s*\}',
+        '', text
+    )
+    # Remove Ollama-style tool blocks: {"function": {"name": ...}}
+    text = re.sub(
+        r'\{\s*"(?:type"\s*:\s*"function"\s*,\s*")?\s*function"\s*:\s*\{[^}]*\}\s*\}',
+        '', text
+    )
+    # Clean up any resulting empty lines
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
 
 
 # ── Tool Safety Tiers ──────────────────────────────────────────────────────
@@ -187,16 +327,33 @@ PASS 1 — RETRIEVAL (gather all materials first):
 PASS 2 — STRUCTURED REASONING (only after Pass 1 is complete):
   Step 1: IDENTIFY the legal issue(s) — state them precisely
   Step 2: MAP relevant law — which statutes and cases apply, and why
-  Step 3: APPLY law to facts — connect the legal standard to the specific scenario
+  Step 3: FACT-TO-LAW COMPARISON — for EACH key fact, explain how it changes the legal analysis:
+    Example for excessive force:
+    - Resistance level: [none/passive/active] → [how this affects Graham reasonableness]
+    - Threat level: [none/minimal/significant/imminent] → [how this affects justification]
+    - Crime severity: [minor infraction/misdemeanor/felony] → [how this weighs]
+    You MUST show how changing ONE fact would change the outcome.
   Step 4: COUNTERARGUMENTS — identify the strongest opposing position
+    Defense arguments MUST be as strong and realistic as possible, not placeholders.
+    Include: officer safety concerns, split-second decision doctrine, lawful order compliance.
   Step 5: CONCLUDE — state your conclusion using this EXACT format:
 
+LIKELY OUTCOME:
+[Clear, directional assessment — not "it depends." State which side has the stronger position and WHY.]
+
 CONFIDENCE: High / Medium / Low
+
 REASONING:
 - Strength of precedent: [strong/moderate/weak — are there on-point SCOTUS/Circuit cases?]
 - Jurisdiction match: [does the authority come from the relevant jurisdiction?]
 - Factual similarity: [how closely do cited cases match the current facts?]
 - Source conflicts: [do any authorities point in different directions?]
+
+CRITICAL RULES:
+- Only include legal doctrines DIRECTLY applicable to the facts.
+- Do NOT introduce unrelated constitutional amendments.
+- Include at least 1 controlling precedent (SCOTUS) AND 1 supporting case (circuit or lower).
+- If deadly force is NOT at issue, do NOT cite Tennessee v. Garner.
 
 PRECEDENT WEIGHTING RULES:
 When multiple cases are available, weight them in this order:
@@ -235,17 +392,31 @@ DISCLAIMER = (
 )
 
 
+CONFIDENCE_MISSING_ADDENDUM = (
+    "\n\n---\n"
+    "**CONFIDENCE: Not assessed**\n\n"
+    "The system's confidence scoring layer did not trigger for this response. "
+    "Treat conclusions with additional caution. Re-run with explicit mode "
+    "(e.g., 'argument mode') to ensure full structured output."
+)
+
+
 def validate_legal_response(response_text: str, intent: str) -> str:
     """
-    Post-processing HARD enforcement: if the intent was legal, verify the
-    response contains at least one verifiable citation. If not, REPLACE
-    the response with a hard-fail message. No uncited legal output passes.
+    Post-processing HARD enforcement for legal responses:
+    1. Citation check — no citations → hard fail (replace response)
+    2. Confidence check — no confidence block → append warning
+    3. Disclaimer check — ensure present
+    4. Output sanitization — strip leaked tool JSON
     """
     if intent != "legal":
-        return response_text
+        return sanitize_output(response_text)
 
     if not response_text or len(response_text.strip()) < 50:
-        return response_text
+        return sanitize_output(response_text)
+
+    # Sanitize first — remove any leaked tool JSON
+    response_text = sanitize_output(response_text)
 
     # The LLM already said "insufficient" — that's a valid grounded response
     if "insufficient" in response_text.lower() and "authority" in response_text.lower():
@@ -265,9 +436,16 @@ def validate_legal_response(response_text: str, intent: str) -> str:
     if not has_statute and not has_case:
         return HARD_FAIL_RESPONSE
 
-    # Citations exist — ensure disclaimer is present
+    # Check for confidence block
+    has_confidence = bool(re.search(
+        r'CONFIDENCE\s*:\s*(?:High|Medium|Low)', response_text, re.IGNORECASE
+    ))
+    if not has_confidence:
+        response_text += CONFIDENCE_MISSING_ADDENDUM
+
+    # Ensure disclaimer is present
     if "not legal advice" not in response_text.lower():
-        return response_text + "\n\n---\n" + DISCLAIMER
+        response_text += "\n\n---\n" + DISCLAIMER
 
     return response_text
 
@@ -354,7 +532,9 @@ class Agent:
         self.config = config
         self.history: list[dict] = []
         self.ollama_host = config["llm"]["ollama_host"]
-        self.mode = "general"  # Current agent mode
+        self.mode = "general"       # Current agent mode
+        self.last_intent = "general" # Intent inheritance for follow-ups
+        self.legal_locked = False    # Sticky legal session flag
 
         # Initialize tools
         self.tool_instances = {
@@ -396,6 +576,8 @@ class Agent:
 
     def clear_history(self):
         self.history = []
+        self.last_intent = "general"
+        self.legal_locked = False
 
     def set_mode(self, mode: str) -> str:
         """Set the agent's operating mode."""
@@ -650,7 +832,7 @@ class Agent:
         return "\n".join(lines)
 
     async def process(self, user_input: str) -> str:
-        """Process user input through the agent loop."""
+        """Process user input through the full agent pipeline."""
 
         # ── Step 0: Mode detection from input ──────────────────────────
         lower_input = user_input.lower()
@@ -663,10 +845,22 @@ class Agent:
         elif "writing mode" in lower_input or "write mode" in lower_input:
             self.set_mode("write")
 
-        # ── Step 1: Intent detection ───────────────────────────────────
-        intent = detect_intent(user_input)
+        # ── Step 1: Intent detection (with inheritance) ────────────────
+        intent = detect_intent(user_input, last_intent=self.last_intent)
+
+        # Sticky legal lock: once a conversation enters legal territory,
+        # ALL subsequent queries are treated as legal until 'clear'
+        if intent == "legal":
+            self.legal_locked = True
+        if self.legal_locked and intent == "general":
+            intent = "legal"
+            print(f"  [Legal Lock] Session is legal-locked — forcing legal intent", flush=True)
+
+        # Store for next turn's inheritance
+        self.last_intent = intent
+
         if intent != "general":
-            print(f"  [Intent: {intent}] [Mode: {self.mode}]", flush=True)
+            print(f"  [Intent: {intent}] [Mode: {self.mode}] [Legal Lock: {self.legal_locked}]", flush=True)
 
         self.history.append({"role": "user", "content": user_input})
 
@@ -682,9 +876,24 @@ class Agent:
         if intent == "legal":
             system_content += TWO_PASS_LEGAL_FRAMEWORK
 
+        # ── Step 1.5: Anchor precedent injection ───────────────────────
+        anchors = detect_anchor_precedents(user_input)
+        # Also check conversation history for anchor triggers (follow-ups)
+        if not anchors and len(self.history) >= 2:
+            for msg in self.history[-4:]:
+                if msg.get("role") in ("user", "assistant"):
+                    anchors = detect_anchor_precedents(msg.get("content", ""))
+                    if anchors:
+                        break
+
+        anchor_injection = build_anchor_injection(anchors)
+        if anchor_injection:
+            system_content += anchor_injection
+            print(f"  [Anchor Precedents] Injecting {len(anchors)} anchor set(s)", flush=True)
+
         messages = [{"role": "system", "content": system_content}] + self.history
 
-        # ── Step 1.5: Fact extraction for legal scenarios ──────────────
+        # ── Step 2: Fact extraction for legal scenarios ────────────────
         extracted_facts = self._extract_facts(user_input, intent)
         if extracted_facts:
             messages.append({
@@ -697,10 +906,10 @@ class Agent:
                 )
             })
 
-        # ── Step 2: Forced retrieval for legal/research intents ────────
+        # ── Step 3: Forced retrieval (cascading fallback chain) ────────
         messages, retrieval_trace = self._force_retrieval(user_input, intent, messages)
 
-        # ── Step 3: Agent loop ─────────────────────────────────────────
+        # ── Step 4: Agent loop ─────────────────────────────────────────
         tools_invoked = []  # Track for source trace
         max_iterations = 10
         for i in range(max_iterations):
@@ -757,7 +966,6 @@ class Agent:
                     if handler:
                         try:
                             result = handler(**func_args)
-                            # Show a preview of the result
                             result_str = str(result)
                             if len(result_str) > 200:
                                 print(f"    ✓ Got result ({len(result_str)} chars)", flush=True)
@@ -779,10 +987,10 @@ class Agent:
                 # No tool calls — this is the final response
                 final = msg.get("content", "")
 
-                # ── Step 4: Citation validation for legal responses ────
+                # ── Step 5: Citation + confidence validation ───────────
                 final = validate_legal_response(final, intent)
 
-                # ── Step 5: Append source trace for legal responses ────
+                # ── Step 6: Append source trace for legal responses ────
                 if intent == "legal":
                     source_trace = self._build_source_trace(retrieval_trace, tools_invoked)
                     if source_trace:
