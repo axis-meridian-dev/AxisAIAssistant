@@ -21,6 +21,7 @@ import re
 import json
 import time
 import ollama
+from pathlib import Path
 from datetime import datetime
 from rich.console import Console
 from rich.table import Table
@@ -66,6 +67,13 @@ RESEARCH_KEYWORDS = [
     "data on", "studies", "evidence", "sources", "articles about",
 ]
 
+# Data acquisition keywords — triggers execution, not summarization
+ACQUISITION_KEYWORDS = [
+    "download", "download all", "collect", "get me", "save",
+    "gather", "scrape", "bulk", "build dataset", "get all",
+    "fetch all", "pull down", "archive", "grab",
+]
+
 # Follow-up phrases that indicate the user is continuing the previous topic
 FOLLOWUP_PHRASES = [
     "same scenario", "same case", "same situation", "same facts",
@@ -90,9 +98,14 @@ def detect_intent(user_input: str, last_intent: str = "general") -> str:
     Uses a two-tier keyword system with context-aware inheritance:
     if the input is a follow-up and no new intent is detected, inherit last_intent.
 
-    Returns: 'legal', 'research', 'general'
+    Returns: 'data_acquisition', 'legal', 'research', 'general'
     """
     lower = user_input.lower()
+
+    # Tier 0: Data acquisition — imperative download/collect commands
+    # Must be checked FIRST — "download all statutes" should execute, not summarize
+    if any(kw in lower for kw in ACQUISITION_KEYWORDS):
+        return "data_acquisition"
 
     # Tier 1: Primary legal keywords — high confidence
     if any(kw in lower for kw in LEGAL_KEYWORDS_PRIMARY):
@@ -903,6 +916,187 @@ class Agent:
         self.mode = mode
         return f"Mode set to: {mode}"
 
+    # ── Data Acquisition Handler ─────────────────────────────────────────
+    async def _handle_data_acquisition(self, user_input: str) -> str:
+        """
+        Handle imperative download/collect commands.
+        Short-circuits the LLM reasoning pipeline — executes tools directly.
+        Only active when autonomous_collection toggle is enabled.
+        """
+        lower = user_input.lower()
+        results = []
+        saved_paths = []
+        errors = []
+
+        # Determine what kind of content the user wants
+        wants_statutes = any(kw in lower for kw in [
+            "statute", "statutes", "state law", "state laws", "gen stat",
+            "legislation", "code", "penal code",
+        ])
+        wants_cases = any(kw in lower for kw in [
+            "case law", "case laws", "court opinion", "court opinions",
+            "rulings", "decisions", "precedent",
+        ])
+        wants_news = any(kw in lower for kw in [
+            "news", "article", "articles", "recent", "headlines",
+            "press", "media", "report",
+        ])
+        wants_stats = any(kw in lower for kw in [
+            "statistic", "statistics", "data", "dataset", "numbers",
+            "demographics", "census",
+        ])
+        wants_general = not (wants_statutes or wants_cases or wants_news or wants_stats)
+
+        # Extract topic / subject from input
+        # Strip acquisition keywords to get the actual subject
+        topic = user_input
+        for kw in ACQUISITION_KEYWORDS:
+            topic = topic.lower().replace(kw, "")
+        topic = topic.strip().strip(".,!?")
+
+        print(f"  [Data Acquisition] Topic: '{topic}'", flush=True)
+        print(f"  [Data Acquisition] Wants: statutes={wants_statutes} cases={wants_cases} "
+              f"news={wants_news} stats={wants_stats} general={wants_general}", flush=True)
+
+        # ── 1. Statute downloads ──────────────────────────────────────
+        if wants_statutes or wants_general:
+            if "legal_research" in self.tool_instances:
+                lr = self.tool_instances["legal_research"]
+                # Build statute search queries from topic
+                statute_queries = [topic]
+                if "connecticut" in lower or "ct " in lower:
+                    statute_queries.append("CT Gen Stat " + topic)
+
+                for sq in statute_queries:
+                    try:
+                        print(f"  [Acquisition] Looking up statute: {sq}", flush=True)
+                        result = lr.lookup_statute(sq)
+                        if result and "not found" not in result.lower():
+                            results.append(f"**Statute:** {sq}\n{result[:200]}...")
+                            saved_paths.append(f"~/LegalResearch/state_statutes/")
+                    except Exception as e:
+                        errors.append(f"Statute lookup '{sq}': {e}")
+
+        # ── 2. Case law downloads ─────────────────────────────────────
+        if wants_cases or wants_general:
+            if "legal_research" in self.tool_instances:
+                lr = self.tool_instances["legal_research"]
+                # Determine jurisdiction
+                jurisdiction = "all"
+                if "connecticut" in lower or "ct " in lower:
+                    jurisdiction = "ct"
+                elif "federal" in lower:
+                    jurisdiction = "federal"
+
+                try:
+                    print(f"  [Acquisition] Searching case law: {topic} (jurisdiction: {jurisdiction})", flush=True)
+                    result = lr.search_case_law(topic, jurisdiction=jurisdiction, max_results=10)
+                    if result:
+                        results.append(f"**Case Law Search:**\n{result}")
+                        saved_paths.append(f"~/LegalResearch/case_law/")
+                except Exception as e:
+                    errors.append(f"Case law search: {e}")
+
+        # ── 3. News article downloads ─────────────────────────────────
+        if wants_news or wants_general:
+            if "legal_research" in self.tool_instances:
+                lr = self.tool_instances["legal_research"]
+                try:
+                    print(f"  [Acquisition] Searching news: {topic}", flush=True)
+                    result = lr.search_legal_news(topic, days_back=30)
+                    if result:
+                        results.append(f"**News:**\n{result}")
+                        saved_paths.append(f"~/LegalResearch/news_clips/")
+                except Exception as e:
+                    errors.append(f"News search: {e}")
+
+        # ── 4. General web search + save ──────────────────────────────
+        if wants_stats or wants_general or wants_news:
+            if "web_search" in self.tool_instances:
+                ws = self.tool_instances["web_search"]
+                search_queries = [topic]
+                if wants_stats:
+                    search_queries.append(f"{topic} statistics data")
+                if wants_news:
+                    search_queries.append(f"{topic} news recent")
+
+                for sq in search_queries:
+                    try:
+                        print(f"  [Acquisition] Web search: {sq}", flush=True)
+                        result = ws.web_search(sq, max_results=self.config.get("search", {}).get("max_results", 5))
+                        if result:
+                            results.append(f"**Web Results ({sq}):**\n{result}")
+                    except Exception as e:
+                        errors.append(f"Web search '{sq}': {e}")
+
+                # Fetch top URLs and save content
+                if "file_manager" in self.tool_instances:
+                    fm = self.tool_instances["file_manager"]
+                    data_dir = Path.home() / "axis" / "data"
+
+                    # Classify and save
+                    if wants_news:
+                        save_dir = data_dir / "news"
+                    elif wants_stats:
+                        save_dir = data_dir / "research" / "statistics"
+                    else:
+                        save_dir = data_dir / "misc"
+
+                    save_dir.mkdir(parents=True, exist_ok=True)
+                    saved_paths.append(str(save_dir))
+
+        # ── 5. Auto-ingest into knowledge base (if toggle is on) ──────
+        auto_ingest = self.config.get("features", {}).get("auto_ingest", False)
+        if auto_ingest and saved_paths and "knowledge_base" in self.tool_instances:
+            kb = self.tool_instances["knowledge_base"]
+            for sp in saved_paths:
+                try:
+                    expanded = str(Path(sp.replace("~", str(Path.home()))))
+                    if Path(expanded).exists() and Path(expanded).is_dir():
+                        print(f"  [Acquisition] Auto-ingesting: {expanded}", flush=True)
+                        kb.ingest_directory(expanded)
+                except Exception as e:
+                    errors.append(f"Auto-ingest '{sp}': {e}")
+
+        # ── Build response ────────────────────────────────────────────
+        response_parts = [f"## Data Acquisition: {topic}\n"]
+
+        if results:
+            response_parts.append(f"**Found {len(results)} result set(s):**\n")
+            for r in results:
+                response_parts.append(r + "\n")
+
+        if saved_paths:
+            response_parts.append("\n**Files saved to:**")
+            for sp in set(saved_paths):
+                response_parts.append(f"- `{sp}`")
+
+        if auto_ingest:
+            response_parts.append("\n*Auto-ingested into knowledge base.*")
+        else:
+            response_parts.append(
+                "\n**Next step:** Run `ingest my LegalResearch folder` "
+                "or enable **Auto Ingest** in Settings to auto-index downloads."
+            )
+
+        if errors:
+            response_parts.append(f"\n**Warnings ({len(errors)}):**")
+            for e in errors:
+                response_parts.append(f"- {e}")
+
+        if not results and not errors:
+            response_parts.append(
+                "No results found. Try being more specific, e.g.:\n"
+                "- `download Connecticut drug possession statutes`\n"
+                "- `get me recent news about police arrests in Hartford`\n"
+                "- `collect statistics on incarceration rates`"
+            )
+
+        self.history.append({"role": "user", "content": user_input})
+        final = "\n".join(response_parts)
+        self.history.append({"role": "assistant", "content": final})
+        return final
+
     # Retrieval boundaries — prevent context flooding
     MAX_RETRIEVAL_CHUNKS = 3
     MAX_RETRIEVAL_CHARS = 4000
@@ -1192,7 +1386,34 @@ class Agent:
         if intent != "general":
             print(f"  [Intent: {intent}] [Mode: {self.mode}] [Legal Lock: {self.legal_locked}]", flush=True)
 
+        # ── Short-circuit: data acquisition ────────────────────────────
+        # If autonomous_collection is enabled and intent is data_acquisition,
+        # bypass the LLM pipeline entirely and execute tools directly.
+        if intent == "data_acquisition":
+            autonomous_enabled = self.config.get("features", {}).get("autonomous_collection", False)
+            if autonomous_enabled:
+                print(f"  [Data Acquisition] Autonomous collection enabled — executing directly", flush=True)
+                return await self._handle_data_acquisition(user_input)
+            else:
+                # Fall through to normal LLM pipeline, but inject execution instruction
+                print(f"  [Data Acquisition] Toggle OFF — routing to LLM with execution instruction", flush=True)
+                intent = "general"  # Let LLM handle it with tool guidance
+
         self.history.append({"role": "user", "content": user_input})
+
+        # If acquisition fell through (toggle OFF), inject system nudge
+        if detect_intent(user_input) == "data_acquisition":
+            self.history.append({
+                "role": "system",
+                "content": (
+                    "[SYSTEM] The user wants to DOWNLOAD and SAVE data, not get a summary. "
+                    "You MUST use your tools (web_search, fetch_webpage, lookup_statute, "
+                    "search_case_law, search_legal_news, clip_article) to actually retrieve "
+                    "and save content. Do NOT just list examples. EXECUTE the downloads. "
+                    "Report what was saved and where.\n"
+                    "Tip: Enable 'Autonomous Collection' in Settings for direct execution."
+                )
+            })
 
         # Determine which model to use
         model = self._select_model(user_input)
