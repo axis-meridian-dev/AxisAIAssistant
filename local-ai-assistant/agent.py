@@ -392,12 +392,21 @@ DISCLAIMER = (
 )
 
 
-CONFIDENCE_MISSING_ADDENDUM = (
-    "\n\n---\n"
-    "**CONFIDENCE: Not assessed**\n\n"
-    "The system's confidence scoring layer did not trigger for this response. "
-    "Treat conclusions with additional caution. Re-run with explicit mode "
-    "(e.g., 'argument mode') to ensure full structured output."
+CONFIDENCE_HARD_REJECT = (
+    "**Response rejected: missing confidence scoring.**\n\n"
+    "The system requires a structured confidence assessment for all legal responses.\n\n"
+    "Expected format:\n"
+    "```\n"
+    "CONFIDENCE: High / Medium / Low\n"
+    "REASONING:\n"
+    "- Strength of precedent: ...\n"
+    "- Jurisdiction match: ...\n"
+    "- Factual similarity: ...\n"
+    "- Source conflicts: ...\n"
+    "```\n\n"
+    "Re-run your query with 'argument mode' or 'analysis mode' for full structured output.\n\n"
+    "Note: This is AI-generated legal research, not legal advice. "
+    "Verify all citations independently."
 )
 
 
@@ -450,12 +459,12 @@ def validate_legal_response(response, intent: str) -> str:
     if not has_statute and not has_case:
         return HARD_FAIL_RESPONSE
 
-    # Check for confidence block
+    # Check for confidence block — HARD REJECT if missing
     has_confidence = bool(re.search(
         r'CONFIDENCE\s*:\s*(?:High|Medium|Low)', response_text, re.IGNORECASE
     ))
     if not has_confidence:
-        response_text += CONFIDENCE_MISSING_ADDENDUM
+        return CONFIDENCE_HARD_REJECT
 
     # Ensure disclaimer is present
     if "not legal advice" not in response_text.lower():
