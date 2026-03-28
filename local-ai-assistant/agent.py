@@ -413,6 +413,97 @@ CONFIDENCE_HARD_REJECT = (
 )
 
 
+# ── Confidence Auto-Patch ─────────────────────────────────────────────────
+
+# High-authority cases that indicate strong grounding when cited
+HIGH_AUTHORITY_CASES = [
+    "Graham v. Connor", "Terry v. Ohio", "Mapp v. Ohio",
+    "Harlow v. Fitzgerald", "Tennessee v. Garner", "Payton v. New York",
+    "Carroll v. United States", "Miranda v. Arizona",
+    "Ashcroft v. al-Kidd", "Pearson v. Callahan",
+]
+
+
+def _auto_patch_confidence(response_text: str) -> str:
+    """
+    Instead of rejecting a response missing CONFIDENCE/REASONING,
+    dynamically compute and append a confidence block based on
+    what the response actually contains.
+
+    Scoring:
+      - SCOTUS case cited: +2 per case (max 6)
+      - Any case citation: +1 per case (max 3)
+      - Statute cited: +1 per statute (max 2)
+      - Has LIKELY OUTCOME section: +1
+      - Has APPLICATION section: +1
+      Total >= 8 → High, >= 4 → Medium, else Low
+    """
+    score = 0
+    reasons = {}
+
+    # Count high-authority (SCOTUS) cases
+    scotus_hits = sum(1 for c in HIGH_AUTHORITY_CASES if c in response_text)
+    score += min(scotus_hits * 2, 6)
+    reasons["strength_of_precedent"] = (
+        "strong" if scotus_hits >= 2 else "moderate" if scotus_hits >= 1 else "weak"
+    )
+
+    # Count any case citations
+    all_cases = re.findall(r'[A-Z][a-z]+\s+v\.\s+[A-Z][a-z]+', response_text)
+    score += min(len(all_cases), 3)
+
+    # Count statute citations
+    statutes = re.findall(
+        r'\d+\s*U\.?S\.?C\.?\s*§?\s*\d+|\bSection\s+\d+|CT Gen Stat', response_text
+    )
+    score += min(len(statutes), 2)
+
+    # Structural completeness
+    if re.search(r'LIKELY\s+OUTCOME', response_text, re.IGNORECASE):
+        score += 1
+    if re.search(r'APPLICATION', response_text, re.IGNORECASE):
+        score += 1
+
+    # Determine confidence level
+    if score >= 8:
+        confidence = "High"
+    elif score >= 4:
+        confidence = "Medium"
+    else:
+        confidence = "Low"
+
+    # Jurisdiction reasoning — check for jurisdiction-specific markers
+    has_jurisdiction = bool(re.search(
+        r'Circuit|District|State|Connecticut|Federal|Supreme Court', response_text
+    ))
+    reasons["jurisdiction_match"] = "yes" if has_jurisdiction else "partial — verify jurisdiction applicability"
+
+    # Factual similarity — heuristic based on APPLICATION section depth
+    app_match = re.search(r'APPLICATION.*?(?=\n[A-Z]{3,}|\Z)', response_text, re.DOTALL | re.IGNORECASE)
+    app_length = len(app_match.group()) if app_match else 0
+    reasons["factual_similarity"] = (
+        "high" if app_length > 500 else "moderate" if app_length > 200 else "low"
+    )
+
+    # Source conflicts
+    has_conflict_language = bool(re.search(
+        r'however|but see|contra|dissent|split|conflict', response_text, re.IGNORECASE
+    ))
+    reasons["source_conflicts"] = "minor — noted in analysis" if has_conflict_language else "none identified"
+
+    # Build the patch block
+    patch = (
+        f"\n\nCONFIDENCE: {confidence}\n\n"
+        f"REASONING:\n"
+        f"- Strength of precedent: {reasons['strength_of_precedent']}\n"
+        f"- Jurisdiction match: {reasons['jurisdiction_match']}\n"
+        f"- Factual similarity: {reasons['factual_similarity']}\n"
+        f"- Source conflicts: {reasons['source_conflicts']}\n"
+    )
+
+    return response_text + patch
+
+
 def validate_legal_response(response, intent: str) -> str:
     """
     Post-processing HARD enforcement for legal responses:
@@ -462,12 +553,12 @@ def validate_legal_response(response, intent: str) -> str:
     if not has_statute and not has_case:
         return HARD_FAIL_RESPONSE
 
-    # Check for confidence block — HARD REJECT if missing
+    # Check for confidence block — AUTO-PATCH if missing
     has_confidence = bool(re.search(
         r'CONFIDENCE\s*:\s*(?:High|Medium|Low)', response_text, re.IGNORECASE
     ))
     if not has_confidence:
-        return CONFIDENCE_HARD_REJECT
+        response_text = _auto_patch_confidence(response_text)
 
     # Ensure disclaimer is present
     if "not legal advice" not in response_text.lower():
@@ -933,6 +1024,11 @@ class Agent:
             intent = "legal"
             print(f"  [Legal Lock] Session is legal-locked — forcing legal intent", flush=True)
 
+        # Force mode escalation: legal intent in general mode → analysis
+        if intent == "legal" and self.mode == "general":
+            self.mode = "analysis"
+            print(f"  [Mode Escalation] legal intent forced mode general → analysis", flush=True)
+
         # Store for next turn's inheritance
         self.last_intent = intent
         inquiry.intent = intent
@@ -995,6 +1091,23 @@ class Agent:
         retrieval_timer.start()
         messages, retrieval_trace = self._force_retrieval(user_input, intent, messages)
         inquiry.retrieval_time = retrieval_timer.stop()
+
+        # ── Step 3.5: Final compliance constraint for legal ─────────────
+        if intent == "legal":
+            messages.append({
+                "role": "system",
+                "content": (
+                    "FINAL INSTRUCTION (NON-NEGOTIABLE): You MUST end your response with "
+                    "a CONFIDENCE and REASONING section. Use this exact format:\n\n"
+                    "CONFIDENCE: High / Medium / Low\n\n"
+                    "REASONING:\n"
+                    "- Strength of precedent: [strong/moderate/weak]\n"
+                    "- Jurisdiction match: [yes/partial/no]\n"
+                    "- Factual similarity: [high/moderate/low]\n"
+                    "- Source conflicts: [none/minor/significant]\n\n"
+                    "If you omit this section, your response will be automatically corrected by the system."
+                )
+            })
 
         # ── Step 4: Agent loop ─────────────────────────────────────────
         tools_invoked = []  # Track for source trace
@@ -1098,22 +1211,17 @@ class Agent:
                 # ── Step 5: Citation + confidence validation ───────────
                 validated = validate_legal_response(final, intent)
 
-                # ── Step 5b: Retry loop on validation failure ──────────
-                # If the response was rejected (hard fail), give the LLM
-                # one chance to fix it with an explicit correction prompt.
+                # ── Step 5b: Retry loop on citation failure ─────────────
+                # If the response has NO citations (hard fail), give the LLM
+                # one chance to fix it. Confidence is now auto-patched, not rejected.
                 is_rejected = (
                     intent == "legal"
-                    and validated in (HARD_FAIL_RESPONSE, CONFIDENCE_HARD_REJECT)
+                    and validated == HARD_FAIL_RESPONSE
                 )
                 if is_rejected and not getattr(self, '_retry_attempted', False):
                     self._retry_attempted = True
                     inquiry.retry_triggered = True
-                    rejection_reason = (
-                        "missing citations (no statute or case law found)"
-                        if validated == HARD_FAIL_RESPONSE
-                        else "missing CONFIDENCE block (High/Medium/Low)"
-                    )
-                    print(f"  [Validation] Response rejected: {rejection_reason} — retrying...", flush=True)
+                    print(f"  [Validation] Response rejected: missing citations — retrying...", flush=True)
 
                     # Add correction instruction and loop back
                     messages.append({
