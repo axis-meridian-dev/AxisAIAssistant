@@ -591,6 +591,14 @@ body {
         <div class="chat-header">
             <div style="font-weight:600;">Chat</div>
             <div style="display:flex;gap:8px;align-items:center;">
+                <select class="setting-input" id="mode-selector" onchange="setMode(this.value)"
+                        style="width:auto;padding:4px 8px;font-size:11px;background:var(--bg-secondary);border:1px solid var(--border);border-radius:4px;color:var(--text-primary);">
+                    <option value="general">General</option>
+                    <option value="research">Research</option>
+                    <option value="analysis" selected>Analysis</option>
+                    <option value="argument">Argument</option>
+                    <option value="write">Write</option>
+                </select>
                 <span class="model-badge" id="active-model">loading...</span>
                 <button class="btn btn-sm" onclick="clearChat()">Clear</button>
             </div>
@@ -685,6 +693,49 @@ body {
                     </div>
                     <input type="number" class="setting-input" id="setting-ctx" 
                            min="4096" max="32768" step="1024" value="8192" onchange="saveSettings()">
+                </div>
+            </div>
+            <div class="card">
+                <h3>Feature Toggles</h3>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Autonomous Collection</div>
+                        <div class="setting-desc">When ON, "download/collect" commands execute tools directly without LLM reasoning. Faster and more reliable for data acquisition.</div>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggle-autonomous-collection" onchange="saveFeatureToggles()">
+                        <div class="toggle-slider"></div>
+                    </label>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Auto Ingest Downloads</div>
+                        <div class="setting-desc">Automatically index downloaded files into the knowledge base for semantic search.</div>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggle-auto-ingest" onchange="saveFeatureToggles()">
+                        <div class="toggle-slider"></div>
+                    </label>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Strict Legal Mode</div>
+                        <div class="setting-desc">Enforce citation requirements, confidence scoring, and adversarial analysis for all legal responses. Recommended ON.</div>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggle-strict-legal" onchange="saveFeatureToggles()" checked>
+                        <div class="toggle-slider"></div>
+                    </label>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Allow External Downloads</div>
+                        <div class="setting-desc">Allow the system to download PDFs, documents, and datasets from external URLs.</div>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="toggle-external-downloads" onchange="saveFeatureToggles()">
+                        <div class="toggle-slider"></div>
+                    </label>
                 </div>
             </div>
             <div class="card">
@@ -980,6 +1031,28 @@ async function toggleTool(name, enabled) {
     });
 }
 
+// ── Mode Selector ─────────────────────────────────────────
+async function setMode(mode) {
+    try {
+        await fetch('/api/mode', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({mode: mode})
+        });
+        console.log('Mode set to:', mode);
+    } catch(e) {
+        console.error('Failed to set mode:', e);
+    }
+}
+
+async function loadCurrentMode() {
+    try {
+        const res = await fetch('/api/mode').then(r=>r.json());
+        const sel = document.getElementById('mode-selector');
+        if (sel && res.mode) sel.value = res.mode;
+    } catch(e) {}
+}
+
 // ── Settings ───────────────────────────────────────────────
 async function loadSettings() {
     const cfg = await fetch('/api/config').then(r=>r.json());
@@ -987,9 +1060,16 @@ async function loadSettings() {
     document.getElementById('setting-ctx').value = cfg.llm?.context_window ?? 8192;
     document.getElementById('setting-searxng').value = cfg.search?.searxng_url ?? '';
     document.getElementById('setting-search-results').value = cfg.search?.max_results ?? 5;
-    
+
     document.getElementById('active-model').textContent = cfg.llm?.primary_model ?? 'unknown';
-    
+
+    // Load feature toggles
+    const features = cfg.features || {};
+    document.getElementById('toggle-autonomous-collection').checked = features.autonomous_collection || false;
+    document.getElementById('toggle-auto-ingest').checked = features.auto_ingest || false;
+    document.getElementById('toggle-strict-legal').checked = features.strict_legal_mode !== false;  // default ON
+    document.getElementById('toggle-external-downloads').checked = features.allow_external_downloads || false;
+
     // Load model selects
     try {
         const models = await fetch('/api/models').then(r=>r.json());
@@ -1018,14 +1098,29 @@ async function saveSettings() {
             max_results: parseInt(document.getElementById('setting-search-results').value),
         }
     };
-    
+
     await fetch('/api/config', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
         body: JSON.stringify(cfg)
     });
-    
+
     document.getElementById('active-model').textContent = cfg.llm.primary_model;
+}
+
+async function saveFeatureToggles() {
+    const features = {
+        autonomous_collection: document.getElementById('toggle-autonomous-collection').checked,
+        auto_ingest: document.getElementById('toggle-auto-ingest').checked,
+        strict_legal_mode: document.getElementById('toggle-strict-legal').checked,
+        allow_external_downloads: document.getElementById('toggle-external-downloads').checked,
+    };
+
+    await fetch('/api/config', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({features})
+    });
 }
 
 // ── Knowledge Base ─────────────────────────────────────────
@@ -1122,6 +1217,7 @@ async function updateSystemStats() {
 
 // ── Init ───────────────────────────────────────────────────
 loadSettings();
+loadCurrentMode();
 updateSystemStats();
 setInterval(updateSystemStats, 5000);
 </script>

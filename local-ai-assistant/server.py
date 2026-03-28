@@ -186,6 +186,23 @@ def update_config():
     return jsonify({"success": True, "config": config})
 
 
+@app.route("/api/mode", methods=["GET"])
+def get_mode():
+    """Get current agent mode."""
+    a = get_agent()
+    return jsonify({"mode": a.mode})
+
+
+@app.route("/api/mode", methods=["POST"])
+def set_mode():
+    """Set agent operating mode."""
+    data = request.json
+    mode = data.get("mode", "general")
+    a = get_agent()
+    result = a.set_mode(mode)
+    return jsonify({"success": "Invalid" not in result, "mode": a.mode, "message": result})
+
+
 @app.route("/api/tools", methods=["GET"])
 def list_tools():
     """List all available tool modules and their functions."""
