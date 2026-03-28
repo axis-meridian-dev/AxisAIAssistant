@@ -168,6 +168,65 @@ ANCHOR_PRECEDENTS = {
         "statutes": [],
         "force_classification": None,
     },
+    "vehicle_search": {
+        "trigger_keywords": [
+            "vehicle search", "car search", "automobile exception", "car crash",
+            "crashed car", "crashed vehicle", "impound", "inventory search",
+            "drugs in car", "weapon in car", "unregistered vehicle",
+            "bill of sale", "vehicle found",
+        ],
+        "cases": [
+            "Carroll v. United States, 267 U.S. 132 (1925) — The automobile exception allows warrantless search of a vehicle if there is probable cause to believe it contains contraband or evidence of a crime.",
+            "Arizona v. Gant, 556 U.S. 332 (2009) — Vehicle search incident to arrest is limited: police may search only if arrestee is unsecured and within reaching distance, or if it is reasonable to believe the vehicle contains evidence of the offense of arrest.",
+            "South Dakota v. Opperman, 428 U.S. 364 (1976) — Inventory searches of lawfully impounded vehicles are permissible without a warrant for caretaking purposes.",
+            "Florida v. Wells, 495 U.S. 1 (1990) — Inventory search must follow standardized police department policy; cannot be used as pretext for investigation.",
+        ],
+        "statutes": [],
+        "force_classification": None,
+    },
+    "home_arrest": {
+        "trigger_keywords": [
+            "arrested at home", "arrest in home", "arrest at house",
+            "arrested in basement", "home entry", "entered home",
+            "warrantless arrest home", "knocked on door",
+        ],
+        "cases": [
+            "Payton v. New York, 445 U.S. 573 (1980) — The Fourth Amendment prohibits warrantless, nonconsensual entry into a suspect's home to make a routine felony arrest. Absent exigent circumstances or consent, an arrest warrant is required.",
+            "Kirk v. Louisiana, 536 U.S. 635 (2002) — Reaffirmed Payton: police may not enter a home to make a warrantless arrest even with probable cause, absent exigent circumstances.",
+            "Welsh v. Wisconsin, 466 U.S. 740 (1984) — When the underlying offense is minor, the exigent circumstances exception to the warrant requirement is especially disfavored for home entry.",
+        ],
+        "statutes": [],
+        "force_classification": None,
+    },
+    "constructive_possession": {
+        "trigger_keywords": [
+            "constructive possession", "drugs found in car", "possession",
+            "not on person", "found in vehicle", "drugs in glove",
+            "paraphernalia", "drug possession",
+        ],
+        "cases": [
+            "Illinois v. Gates, 462 U.S. 213 (1983) — Totality of the circumstances test for evaluating probable cause; replaced rigid two-pronged Aguilar-Spinelli test.",
+            "Maryland v. Pringle, 540 U.S. 366 (2003) — Drugs found in a vehicle can support probable cause to arrest all occupants, but officers must articulate a reasonable basis linking the suspect to the contraband.",
+        ],
+        "statutes": [],
+        "force_classification": None,
+    },
+    "weapon_classification": {
+        "trigger_keywords": [
+            "dangerous weapon", "weapon in vehicle", "pepper spray",
+            "gun-shaped", "imitation weapon", "weapon charge",
+            "felony weapon", "53a-217",
+        ],
+        "cases": [
+            "District of Columbia v. Heller, 554 U.S. 570 (2008) — Second Amendment protects individual right to bear arms; relevant to statutory interpretation of 'weapon' definitions.",
+        ],
+        "statutes": [
+            "CT Gen Stat § 53-206 — Carrying of dangerous weapons: defines what constitutes a 'dangerous weapon' under Connecticut law. Pepper spray/mace generally NOT classified as a dangerous weapon if carried for self-defense.",
+            "CT Gen Stat § 53a-3(6) — Definition of 'dangerous weapon': any instrument, article or substance which, under the circumstances in which it is used or attempted or threatened to be used, is capable of causing death or serious physical injury.",
+            "CT Gen Stat § 29-38 — Weapons in vehicles: prohibits carrying certain weapons in motor vehicles. Applies to pistols, revolvers, and other specific weapon types. Pepper spray may NOT qualify.",
+        ],
+        "force_classification": None,
+    },
 }
 
 
@@ -295,13 +354,35 @@ MODE_INSTRUCTIONS = {
     ),
     "argument": (
         "\n[MODE: ARGUMENT] You MUST structure your response using this exact format:\n\n"
-        "LEGAL ISSUE:\n[One-sentence framing of the core legal question]\n\n"
-        "PLAINTIFF ARGUMENT:\n[Numbered points with citations for each]\n\n"
-        "DEFENSE ARGUMENT:\n[Numbered points with citations for each]\n\n"
+        "LEGAL ISSUES:\n[Numbered list of every distinct legal question raised by the facts]\n\n"
+        "CHARGES BREAKDOWN:\n[For each charge: elements required, what prosecution must prove, statutory basis]\n\n"
+        "CONSTITUTIONAL ANALYSIS:\n"
+        "- Search (vehicle): [Was the search lawful? What exception applies?]\n"
+        "- Seizure (evidence): [Chain of custody, nexus to suspect]\n"
+        "- Arrest (home entry): [Warrant? Exigent circumstances? Consent?]\n\n"
+        "PROSECUTION THEORY:\n[Numbered points with citations — how prosecution builds its case]\n\n"
+        "DEFENSE THEORY:\n[Numbered points with citations — strongest defense arguments]\n\n"
+        "MULTI-PERSPECTIVE ANALYSIS:\n"
+        "- Police perspective: [Their reasoning, what they relied on, potential procedural gaps]\n"
+        "- Suspect perspective: [Constitutional rights, plausible alternative narratives]\n"
+        "- Defense attorney strategy: [Motions to file, evidence to suppress, arguments to make]\n"
+        "- Prosecutor strategy: [How to build circumstantial case, key evidence to emphasize]\n"
+        "- Judge considerations: [Evidentiary rulings, constitutional scrutiny, sentencing factors]\n"
+        "- Jury perception: [What a reasonable juror would infer, bias risks, emotional weight]\n"
+        "- Public/media narrative: [How this plays in the press, reputation impact, public interest]\n\n"
         "KEY PRECEDENTS:\n[Case name — holding — which side it favors]\n\n"
-        "WEAKNESSES:\n- Plaintiff: [biggest vulnerability]\n- Defense: [biggest vulnerability]\n\n"
-        "LIKELY OUTCOME:\n[Brief assessment based on weight of authority]\n\n"
-        "Do NOT deviate from this structure. Every claim must cite authority."
+        "CRITICAL WEAKNESSES:\n"
+        "- In prosecution case: [Biggest vulnerabilities]\n"
+        "- In defense case: [Biggest vulnerabilities]\n\n"
+        "EXPANSION POINTS:\n"
+        "- Possible additional charges: [What else could be charged?]\n"
+        "- Possible suppression arguments: [What evidence could be excluded?]\n"
+        "- Civil rights claims (if any): [Potential § 1983 or other claims]\n\n"
+        "FOLLOW-UP QUESTIONS:\n[Numbered list of factual questions that would change the analysis]\n\n"
+        "LIKELY OUTCOME:\n[Clear directional assessment based on weight of authority]\n\n"
+        "Do NOT deviate from this structure. Every claim must cite authority.\n"
+        "Do NOT assume police actions are valid — scrutinize them equally.\n"
+        "Do NOT use weak placeholder arguments for defense — make them as strong as possible."
     ),
     "write": (
         "\n[MODE: WRITE] Produce a polished document (essay, brief, article, memo). "
@@ -328,18 +409,43 @@ PASS 1 — RETRIEVAL (gather all materials first):
   Step 4: If gaps remain, use web_search or search_legal_news
 
 PASS 2 — STRUCTURED REASONING (only after Pass 1 is complete):
-  Step 1: IDENTIFY the legal issue(s) — state them precisely
-  Step 2: MAP relevant law — which statutes and cases apply, and why
+  Step 1: IDENTIFY the legal issue(s) — state them precisely. List EVERY distinct issue.
+  Step 2: MAP relevant law — which statutes and cases apply, and why.
+    CRITICAL: Verify statute applicability. Do NOT cite a firearm statute for non-firearm objects.
+    Do NOT cite an irrelevant statute just because it appeared in search results.
   Step 3: FACT-TO-LAW COMPARISON — for EACH key fact, explain how it changes the legal analysis:
     Example for excessive force:
     - Resistance level: [none/passive/active] → [how this affects Graham reasonableness]
     - Threat level: [none/minimal/significant/imminent] → [how this affects justification]
     - Crime severity: [minor infraction/misdemeanor/felony] → [how this weighs]
+    Example for vehicle/arrest scenario:
+    - Nexus: [What links suspect to vehicle? Bill of sale ≠ driver at time of crash]
+    - Home entry: [Was there a warrant? Consent? Exigent circumstances?]
+    - Constructive possession: [Was suspect in dominion/control of contraband?]
+    - Weapon classification: [Does the object meet the statutory definition?]
     You MUST show how changing ONE fact would change the outcome.
-  Step 4: COUNTERARGUMENTS — identify the strongest opposing position
-    Defense arguments MUST be as strong and realistic as possible, not placeholders.
-    Include: officer safety concerns, split-second decision doctrine, lawful order compliance.
-  Step 5: CONCLUDE — state your conclusion using this EXACT format:
+  Step 4: ADVERSARIAL ANALYSIS — you MUST analyze from ALL perspectives:
+    a) PROSECUTION: Build the strongest possible case. Identify every inference favorable to state.
+    b) DEFENSE: Build the strongest possible defense. Challenge EVERY element.
+       Defense arguments MUST be as strong and realistic as possible, not placeholders.
+    c) POLICE: What was their reasoning? Where are procedural gaps?
+    d) JUDGE: What evidentiary rulings are likely? What constitutional issues will be scrutinized?
+    e) JURY: What would a reasonable juror infer? What biases might affect perception?
+    f) PUBLIC/MEDIA: How does this play in the press? What narrative forms?
+  Step 5: SCRUTINIZE — you must aggressively challenge:
+    - Probable cause gaps (is the evidence actually sufficient?)
+    - Nexus between suspect and evidence (ownership ≠ possession ≠ use)
+    - Warrant requirements (especially home entry under Payton v. New York)
+    - Misapplied or weak statutes (is the charge actually supported by the statute cited?)
+    - Overcharging (are felony charges appropriate for the conduct?)
+    You must NOT assume police actions are valid. Challenge both sides equally.
+  Step 6: EXPAND — identify what's missing:
+    - Additional charges that could apply
+    - Additional defenses not yet raised
+    - Suppression arguments (4th Amendment violations)
+    - Civil rights claims (§ 1983 if applicable)
+    - Follow-up factual questions that would change the analysis
+  Step 7: CONCLUDE — state your conclusion using this EXACT format:
 
 LIKELY OUTCOME:
 [Clear, directional assessment — not "it depends." State which side has the stronger position and WHY.]
@@ -650,20 +756,59 @@ REQUIRED OUTPUT FORMAT (MANDATORY — LEGAL RESPONSES ONLY)
 For ALL legal responses, you MUST include EVERY section below.
 If ANY section is missing, your response is INVALID and will be rejected by the system.
 
-LEGAL ISSUE:
-[One-sentence framing of the core legal question]
+LEGAL ISSUES:
+[Numbered list of every distinct legal question raised by the facts]
+
+CHARGES BREAKDOWN:
+[For each charge: elements the prosecution must prove, statutory basis, potential issues with the charge]
+
+CONSTITUTIONAL ANALYSIS:
+- Search: [Was any search lawful? What exception applies or was violated?]
+- Seizure: [Was evidence properly seized? Chain of custody issues?]
+- Arrest: [Was the arrest lawful? Warrant? Exigent circumstances? Home entry issues?]
 
 APPLICABLE LAW:
 - [Statute citation] — [Short description]
+IMPORTANT: Verify each statute actually applies to the facts. Do NOT cite firearm statutes for non-firearms.
+Do NOT cite statutes that are tangentially related but do not match the actual conduct.
 
 CASE LAW:
 - [Case name], [Volume] [Reporter] [Page] ([Court] [Year]) — [Holding]
 
-APPLICATION:
-[Your analysis tying law + cases to the facts]
+PROSECUTION THEORY:
+[How the prosecution builds its case — key evidence, inferences, chain of reasoning]
+
+DEFENSE THEORY:
+[Strongest defense arguments — constitutional challenges, element failures, alternative explanations]
+Defense arguments MUST be as strong and realistic as possible. Do NOT use placeholders.
+
+MULTI-PERSPECTIVE ANALYSIS:
+- Police perspective: [Their reasoning, what they relied on, procedural strengths/gaps]
+- Suspect perspective: [Constitutional rights at stake, plausible alternative narratives]
+- Defense attorney strategy: [Motions to file, evidence to suppress, trial strategy]
+- Prosecutor strategy: [How to overcome defense objections, key evidence to emphasize]
+- Judge considerations: [Evidentiary rulings, constitutional scrutiny, sentencing factors]
+- Jury perception: [What reasonable jurors would infer, bias risks, emotional weight of evidence]
+- Public/media narrative: [How this case plays in the press, reputation impact]
+
+KEY PRECEDENTS:
+[Case name — holding — which side it favors — why it matters here]
+
+CRITICAL WEAKNESSES:
+- In prosecution case: [Specific vulnerabilities — missing evidence, constitutional issues, weak nexus]
+- In defense case: [Specific vulnerabilities — damaging evidence, unfavorable inferences]
+
+EXPANSION POINTS:
+- Possible additional charges: [What else could be charged based on facts?]
+- Possible additional defenses: [What other defenses could be raised?]
+- Possible suppression arguments: [What evidence could be excluded and why?]
+- Civil rights claims (if any): [Potential § 1983 or other claims against officers]
+
+FOLLOW-UP QUESTIONS:
+[Numbered list of factual questions whose answers would change the legal analysis]
 
 LIKELY OUTCOME:
-[Clear directional assessment — state which side has the stronger position]
+[Clear directional assessment — state which side has the stronger position and WHY]
 
 CONFIDENCE: High / Medium / Low
 
@@ -675,11 +820,21 @@ REASONING:
 
 Note: This is AI-generated legal research, not legal advice. Verify all citations independently.
 
-If you are in ARGUMENT mode, you must ALSO include:
-PLAINTIFF ARGUMENT:
-DEFENSE ARGUMENT:
-KEY PRECEDENTS:
-WEAKNESSES:
+═══════════════════════════════════════════════════════════
+ADVERSARIAL ANALYSIS RULES (MANDATORY)
+═══════════════════════════════════════════════════════════
+
+You must aggressively scrutinize:
+- Probable cause gaps — is the evidence actually sufficient for each charge?
+- Nexus between suspect and evidence — ownership ≠ possession ≠ use ≠ driving
+- Warrant requirements — especially home entry (Payton v. New York)
+- Misapplied or weak statutes — does the charged statute actually cover this conduct?
+- Overcharging — are felony charges appropriate or is this charge stacking?
+
+You must NOT assume police actions are valid. Challenge them.
+You must NOT assume prosecution theory is correct. Test every element.
+You must challenge BOTH prosecution AND defense equally.
+You must identify what facts are MISSING and what questions remain unanswered.
 
 DO NOT skip any section. DO NOT merge sections. Output each heading exactly as shown."""
 
@@ -1221,7 +1376,8 @@ class Agent:
                 if is_rejected and not getattr(self, '_retry_attempted', False):
                     self._retry_attempted = True
                     inquiry.retry_triggered = True
-                    print(f"  [Validation] Response rejected: missing citations — retrying...", flush=True)
+                    rejection_reason = "missing legal citations"
+                    print(f"  [Validation] Response rejected: {rejection_reason} — retrying...", flush=True)
 
                     # Add correction instruction and loop back
                     messages.append({
@@ -1229,8 +1385,10 @@ class Agent:
                         "content": (
                             f"[SYSTEM REJECTION] Your previous response was rejected because: {rejection_reason}.\n"
                             "You MUST fix this. Re-generate your response and include ALL required sections:\n"
-                            "LEGAL ISSUE, APPLICABLE LAW, CASE LAW, APPLICATION, LIKELY OUTCOME, "
-                            "CONFIDENCE (High/Medium/Low), REASONING.\n"
+                            "LEGAL ISSUES, CHARGES BREAKDOWN, CONSTITUTIONAL ANALYSIS, "
+                            "PROSECUTION THEORY, DEFENSE THEORY, MULTI-PERSPECTIVE ANALYSIS, "
+                            "KEY PRECEDENTS, CRITICAL WEAKNESSES, EXPANSION POINTS, "
+                            "FOLLOW-UP QUESTIONS, LIKELY OUTCOME, CONFIDENCE (High/Medium/Low), REASONING.\n"
                             "Use the tools (lookup_statute, search_case_law) if you need sources.\n"
                             "Do NOT skip any section."
                         )
