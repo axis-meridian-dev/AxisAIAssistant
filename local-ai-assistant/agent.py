@@ -19,7 +19,9 @@ Architecture layers:
 
 import re
 import json
+import time
 import ollama
+from datetime import datetime
 from rich.console import Console
 from rich.table import Table
 
@@ -30,6 +32,7 @@ from tools.system_info import SystemInfoTool
 from tools.knowledge_base import KnowledgeBaseTool
 from tools.legal_research import LegalResearchTool
 from tools.document_writer import DocumentWriterTool
+from stats import InquiryStats, StatsTimer, SessionStats
 
 console = Console()
 
@@ -599,6 +602,10 @@ class Agent:
         self.last_intent = "general" # Intent inheritance for follow-ups
         self.legal_locked = False    # Sticky legal session flag
 
+        # Performance tracking
+        self.session_stats = SessionStats()
+        self.last_inquiry_stats: InquiryStats | None = None
+
         # Initialize tools
         self.tool_instances = {
             "file_manager": FileManagerTool(config),
@@ -896,6 +903,13 @@ class Agent:
 
     async def process(self, user_input: str) -> str:
         """Process user input through the full agent pipeline."""
+        process_start = time.perf_counter()
+
+        # Initialize inquiry stats
+        inquiry = InquiryStats(
+            query=user_input[:200],
+            timestamp=datetime.now().isoformat(),
+        )
 
         # ── Step 0: Mode detection from input ──────────────────────────
         lower_input = user_input.lower()
@@ -921,6 +935,8 @@ class Agent:
 
         # Store for next turn's inheritance
         self.last_intent = intent
+        inquiry.intent = intent
+        inquiry.mode = self.mode
 
         if intent != "general":
             print(f"  [Intent: {intent}] [Mode: {self.mode}] [Legal Lock: {self.legal_locked}]", flush=True)
@@ -929,6 +945,7 @@ class Agent:
 
         # Determine which model to use
         model = self._select_model(user_input)
+        inquiry.model = model
         print(f"  [Model: {model}]", flush=True)
 
         # Build message list with system prompt + mode instruction + reasoning framework
@@ -957,8 +974,12 @@ class Agent:
         messages = [{"role": "system", "content": system_content}] + self.history
 
         # ── Step 2: Fact extraction for legal scenarios ────────────────
+        fact_timer = StatsTimer()
+        fact_timer.start()
         extracted_facts = self._extract_facts(user_input, intent)
+        inquiry.fact_extraction_time = fact_timer.stop()
         if extracted_facts:
+            inquiry.llm_calls += 1  # fact extraction uses fast model
             messages.append({
                 "role": "system",
                 "content": (
@@ -970,7 +991,10 @@ class Agent:
             })
 
         # ── Step 3: Forced retrieval (cascading fallback chain) ────────
+        retrieval_timer = StatsTimer()
+        retrieval_timer.start()
         messages, retrieval_trace = self._force_retrieval(user_input, intent, messages)
+        inquiry.retrieval_time = retrieval_timer.stop()
 
         # ── Step 4: Agent loop ─────────────────────────────────────────
         tools_invoked = []  # Track for source trace
@@ -979,6 +1003,8 @@ class Agent:
             print(f"  [Step {i+1}] Sending to LLM...", flush=True)
 
             try:
+                llm_timer = StatsTimer()
+                llm_timer.start()
                 response = ollama.chat(
                     model=model,
                     messages=messages,
@@ -988,6 +1014,8 @@ class Agent:
                         "num_ctx": self.config["llm"]["context_window"],
                     }
                 )
+                inquiry.llm_time += llm_timer.stop()
+                inquiry.llm_calls += 1
             except Exception as e:
                 error_msg = f"LLM error: {e}"
                 print(f"  [ERROR] {error_msg}", flush=True)
@@ -1024,8 +1052,10 @@ class Agent:
                     # Track tool usage for source trace
                     tools_invoked.append(func_name)
 
-                    # Execute the tool
+                    # Execute the tool with timing
                     handler = self.tool_handlers.get(func_name)
+                    tool_timer = StatsTimer()
+                    tool_timer.start()
                     if handler:
                         try:
                             result = handler(**func_args)
@@ -1036,15 +1066,27 @@ class Agent:
                                 print(f"    ✓ {result_str}", flush=True)
                         except Exception as e:
                             result = f"Tool error: {e}"
+                            result_str = str(result)
                             print(f"    ✗ {result}", flush=True)
                     else:
                         result = f"Unknown tool: {func_name}"
+                        result_str = str(result)
                         print(f"    ✗ {result}", flush=True)
+                    inquiry.tool_time += tool_timer.stop()
+
+                    # Track tool usage stats
+                    inquiry.tools_called.append(func_name)
+                    inquiry.tool_call_count += 1
+                    data_type = SessionStats.classify_tool_data(func_name)
+                    if data_type == "online":
+                        inquiry.online_data_chars += len(result_str)
+                    else:
+                        inquiry.offline_data_chars += len(result_str)
 
                     # Add tool result to messages
                     messages.append({
                         "role": "tool",
-                        "content": str(result)
+                        "content": result_str
                     })
             else:
                 # No tool calls — this is the final response
@@ -1065,6 +1107,7 @@ class Agent:
                 )
                 if is_rejected and not getattr(self, '_retry_attempted', False):
                     self._retry_attempted = True
+                    inquiry.retry_triggered = True
                     rejection_reason = (
                         "missing citations (no statute or case law found)"
                         if validated == HARD_FAIL_RESPONSE
@@ -1090,6 +1133,9 @@ class Agent:
                 self._retry_attempted = False
                 final = validated
 
+                # Track validation outcome
+                inquiry.validation_passed = validated not in (HARD_FAIL_RESPONSE, CONFIDENCE_HARD_REJECT)
+
                 # ── Step 6: Append source trace for legal responses ────
                 if intent == "legal":
                     source_trace = self._build_source_trace(retrieval_trace, tools_invoked)
@@ -1103,8 +1149,18 @@ class Agent:
                 if len(self.history) > 40:
                     self.history = self.history[-30:]
 
+                # ── Record performance stats ──────────────────────────
+                inquiry.total_time = time.perf_counter() - process_start
+                inquiry.response_chars = len(final)
+                self.session_stats.record_inquiry(inquiry)
+                self.last_inquiry_stats = inquiry
+
                 return final
 
+        # Max iterations reached — still record stats
+        inquiry.total_time = time.perf_counter() - process_start
+        self.session_stats.record_inquiry(inquiry)
+        self.last_inquiry_stats = inquiry
         return "Reached maximum tool iterations. Please try a simpler request."
 
     def _select_model(self, user_input: str) -> str:
