@@ -47,6 +47,7 @@
         ]
     },
     "enabled_tools": {
-        "document_writer": true
+        "document_writer": true,
+        "system_info": true
     }
 }
