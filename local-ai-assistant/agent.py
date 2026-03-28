@@ -547,7 +547,47 @@ GENERAL WORKFLOW:
 - Downloaded statutes/opinions go to ~/LegalResearch/ — ingest them into the knowledge base
 - For news monitoring: search_legal_news → clip_article → auto-tag → link to legal authority
 
-Think step by step about which tools to use, then use them."""
+Think step by step about which tools to use, then use them.
+
+═══════════════════════════════════════════════════════════
+REQUIRED OUTPUT FORMAT (MANDATORY — LEGAL RESPONSES ONLY)
+═══════════════════════════════════════════════════════════
+
+For ALL legal responses, you MUST include EVERY section below.
+If ANY section is missing, your response is INVALID and will be rejected by the system.
+
+LEGAL ISSUE:
+[One-sentence framing of the core legal question]
+
+APPLICABLE LAW:
+- [Statute citation] — [Short description]
+
+CASE LAW:
+- [Case name], [Volume] [Reporter] [Page] ([Court] [Year]) — [Holding]
+
+APPLICATION:
+[Your analysis tying law + cases to the facts]
+
+LIKELY OUTCOME:
+[Clear directional assessment — state which side has the stronger position]
+
+CONFIDENCE: High / Medium / Low
+
+REASONING:
+- Strength of precedent: [strong/moderate/weak]
+- Jurisdiction match: [yes/partial/no]
+- Factual similarity: [high/moderate/low]
+- Source conflicts: [none/minor/significant]
+
+Note: This is AI-generated legal research, not legal advice. Verify all citations independently.
+
+If you are in ARGUMENT mode, you must ALSO include:
+PLAINTIFF ARGUMENT:
+DEFENSE ARGUMENT:
+KEY PRECEDENTS:
+WEAKNESSES:
+
+DO NOT skip any section. DO NOT merge sections. Output each heading exactly as shown."""
 
 
 class Agent:
@@ -1014,7 +1054,41 @@ class Agent:
                     final = str(final)
 
                 # ── Step 5: Citation + confidence validation ───────────
-                final = validate_legal_response(final, intent)
+                validated = validate_legal_response(final, intent)
+
+                # ── Step 5b: Retry loop on validation failure ──────────
+                # If the response was rejected (hard fail), give the LLM
+                # one chance to fix it with an explicit correction prompt.
+                is_rejected = (
+                    intent == "legal"
+                    and validated in (HARD_FAIL_RESPONSE, CONFIDENCE_HARD_REJECT)
+                )
+                if is_rejected and not getattr(self, '_retry_attempted', False):
+                    self._retry_attempted = True
+                    rejection_reason = (
+                        "missing citations (no statute or case law found)"
+                        if validated == HARD_FAIL_RESPONSE
+                        else "missing CONFIDENCE block (High/Medium/Low)"
+                    )
+                    print(f"  [Validation] Response rejected: {rejection_reason} — retrying...", flush=True)
+
+                    # Add correction instruction and loop back
+                    messages.append({
+                        "role": "system",
+                        "content": (
+                            f"[SYSTEM REJECTION] Your previous response was rejected because: {rejection_reason}.\n"
+                            "You MUST fix this. Re-generate your response and include ALL required sections:\n"
+                            "LEGAL ISSUE, APPLICABLE LAW, CASE LAW, APPLICATION, LIKELY OUTCOME, "
+                            "CONFIDENCE (High/Medium/Low), REASONING.\n"
+                            "Use the tools (lookup_statute, search_case_law) if you need sources.\n"
+                            "Do NOT skip any section."
+                        )
+                    })
+                    continue  # Go back to top of agent loop for retry
+
+                # Reset retry flag for next query
+                self._retry_attempted = False
+                final = validated
 
                 # ── Step 6: Append source trace for legal responses ────
                 if intent == "legal":
