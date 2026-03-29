@@ -208,28 +208,30 @@ def list_tools():
     """List all available tool modules and their functions."""
     a = get_agent()
     tools = {}
-    for name, instance in a.tool_instances.items():
-        funcs = []
-        for defn in instance.get_tool_definitions():
-            funcs.append({
-                "name": defn["function"]["name"],
-                "description": defn["function"].get("description", ""),
-            })
-        tools[name] = {
-            "enabled": True,
-            "function_count": len(funcs),
-            "functions": funcs,
-        }
-    
-    # Also list disabled tools
+
+    # All known tool names
     all_tools = [
         "file_manager", "web_search", "desktop_control", "system_info",
         "knowledge_base", "legal_research", "document_writer"
     ]
-    for t in all_tools:
-        if t not in tools:
-            tools[t] = {"enabled": False, "function_count": 0, "functions": []}
-    
+
+    for name in all_tools:
+        if name in a.tool_instances:
+            instance = a.tool_instances[name]
+            funcs = []
+            for defn in instance.get_tool_definitions():
+                funcs.append({
+                    "name": defn["function"]["name"],
+                    "description": defn["function"].get("description", ""),
+                })
+            tools[name] = {
+                "enabled": True,
+                "function_count": len(funcs),
+                "functions": funcs,
+            }
+        else:
+            tools[name] = {"enabled": False, "function_count": 0, "functions": []}
+
     return jsonify(tools)
 
 
