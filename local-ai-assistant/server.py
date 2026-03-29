@@ -48,10 +48,13 @@ def chat():
     """Send a message to the agent and get a response."""
     data = request.json
     message = data.get("message", "")
-    
+
     if not message.strip():
         return jsonify({"error": "Empty message"}), 400
-    
+
+    import time as _time
+    start = _time.time()
+
     with agent_lock:
         a = get_agent()
         loop = asyncio.new_event_loop()
@@ -61,11 +64,14 @@ def chat():
             response = f"Error: {e}"
         finally:
             loop.close()
-    
+
+    elapsed = _time.time() - start
+
     return jsonify({
         "response": response,
         "model": config["llm"]["primary_model"],
-        "timestamp": datetime.now().isoformat()
+        "timestamp": datetime.now().isoformat(),
+        "response_time": round(elapsed, 2),
     })
 
 
@@ -208,28 +214,30 @@ def list_tools():
     """List all available tool modules and their functions."""
     a = get_agent()
     tools = {}
-    for name, instance in a.tool_instances.items():
-        funcs = []
-        for defn in instance.get_tool_definitions():
-            funcs.append({
-                "name": defn["function"]["name"],
-                "description": defn["function"].get("description", ""),
-            })
-        tools[name] = {
-            "enabled": True,
-            "function_count": len(funcs),
-            "functions": funcs,
-        }
-    
-    # Also list disabled tools
+
+    # All known tool names
     all_tools = [
         "file_manager", "web_search", "desktop_control", "system_info",
         "knowledge_base", "legal_research", "document_writer"
     ]
-    for t in all_tools:
-        if t not in tools:
-            tools[t] = {"enabled": False, "function_count": 0, "functions": []}
-    
+
+    for name in all_tools:
+        if name in a.tool_instances:
+            instance = a.tool_instances[name]
+            funcs = []
+            for defn in instance.get_tool_definitions():
+                funcs.append({
+                    "name": defn["function"]["name"],
+                    "description": defn["function"].get("description", ""),
+                })
+            tools[name] = {
+                "enabled": True,
+                "function_count": len(funcs),
+                "functions": funcs,
+            }
+        else:
+            tools[name] = {"enabled": False, "function_count": 0, "functions": []}
+
     return jsonify(tools)
 
 
@@ -343,10 +351,41 @@ def legal_files():
 
 @app.route("/api/chat/clear", methods=["POST"])
 def clear_chat():
-    """Clear conversation history."""
+    """Clear conversation history, saving the old session first."""
     a = get_agent()
+    if a.history:
+        a.session_stats.save_chat_session(a.history)
     a.clear_history()
     return jsonify({"success": True})
+
+
+@app.route("/api/chat/history", methods=["GET"])
+def chat_history_list():
+    """List saved chat sessions."""
+    a = get_agent()
+    sessions = a.session_stats.list_chat_sessions(limit=30)
+    return jsonify({"sessions": sessions})
+
+
+@app.route("/api/chat/history/<session_id>", methods=["GET"])
+def chat_history_load(session_id):
+    """Load a specific chat session."""
+    a = get_agent()
+    session = a.session_stats.load_chat_session(session_id)
+    if session is None:
+        return jsonify({"error": "Session not found"}), 404
+    return jsonify(session)
+
+
+@app.route("/api/chat/history/<session_id>", methods=["DELETE"])
+def chat_history_delete(session_id):
+    """Delete a saved chat session."""
+    a = get_agent()
+    session_file = a.session_stats.history_dir / f"chat_{session_id}.json"
+    if session_file.exists():
+        session_file.unlink()
+        return jsonify({"success": True})
+    return jsonify({"error": "Session not found"}), 404
 
 
 # ── Run ─────────────────────────────────────────────────────────────────────
