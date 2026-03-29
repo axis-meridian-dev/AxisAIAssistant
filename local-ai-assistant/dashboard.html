@@ -246,6 +246,46 @@ body {
     font-family: var(--font-mono);
 }
 
+.message .meta .response-time {
+    margin-left: 8px;
+    color: var(--accent);
+}
+
+.history-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    padding: 14px 16px;
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    margin-bottom: 8px;
+    cursor: pointer;
+    transition: background 0.15s;
+}
+
+.history-row:hover { background: var(--bg-hover); }
+
+.history-info {
+    flex: 1;
+}
+
+.history-date {
+    font-weight: 600;
+    font-size: 13px;
+    margin-bottom: 2px;
+}
+
+.history-meta {
+    font-size: 12px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+}
+
+.history-actions {
+    display: flex;
+    gap: 6px;
+}
+
 .chat-input-area {
     padding: 16px 24px 24px;
     border-top: 1px solid var(--border);
@@ -562,6 +602,10 @@ body {
             <span class="icon">⚙️</span> <span>Settings</span>
         </div>
         
+        <div class="nav-item" data-page="history">
+            <span class="icon">&#128220;</span> <span>Chat History</span>
+        </div>
+
         <div class="nav-section">Library</div>
         <div class="nav-item" data-page="knowledge">
             <span class="icon">📚</span> <span>Knowledge Base</span>
@@ -652,6 +696,21 @@ body {
         </div>
         <div class="page-content">
             <div id="tools-list">Loading...</div>
+        </div>
+    </div>
+
+    <!-- History Page -->
+    <div class="page" id="page-history">
+        <div class="page-header">
+            <h2>Chat History</h2>
+            <p>Browse and reload past conversations</p>
+        </div>
+        <div class="page-content">
+            <div id="history-list">Loading...</div>
+            <div id="history-viewer" style="display:none;">
+                <button class="btn btn-sm" onclick="closeHistoryViewer()" style="margin-bottom:12px;">Back to list</button>
+                <div id="history-messages" class="chat-messages" style="max-height:60vh;overflow-y:auto;border:1px solid var(--border);border-radius:var(--radius);padding:16px;"></div>
+            </div>
         </div>
     </div>
 
@@ -800,6 +859,7 @@ document.querySelectorAll('.nav-item').forEach(item => {
         if (page === 'settings') loadSettings();
         if (page === 'knowledge') loadKnowledgeStats();
         if (page === 'legal') loadLegalFiles();
+        if (page === 'history') loadHistory();
     });
 });
 
@@ -825,7 +885,7 @@ async function sendMessage() {
             body: JSON.stringify({message: msg})
         });
         const data = await res.json();
-        addMessage('assistant', data.response, data.model);
+        addMessage('assistant', data.response, data.model, data.response_time);
     } catch(e) {
         addMessage('assistant', 'Error: Could not reach the server. Is server.py running?');
     }
@@ -835,11 +895,11 @@ async function sendMessage() {
     input.focus();
 }
 
-function addMessage(role, content, model) {
+function addMessage(role, content, model, responseTime) {
     const container = document.getElementById('chat-messages');
     const div = document.createElement('div');
     div.className = `message ${role}`;
-    
+
     const avatar = role === 'user' ? '👤' : '🤖';
     const escaped = content
         .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
@@ -847,10 +907,15 @@ function addMessage(role, content, model) {
         .replace(/`([^`]+)`/g, '<code>$1</code>')
         .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
         .replace(/\n/g, '<br>');
-    
+
     let meta = '';
-    if (model) meta = `<div class="meta">${model}</div>`;
-    
+    if (model || responseTime != null) {
+        const parts = [];
+        if (model) parts.push(model);
+        if (responseTime != null) parts.push(`<span class="response-time">${responseTime}s</span>`);
+        meta = `<div class="meta">${parts.join(' · ')}</div>`;
+    }
+
     div.innerHTML = `
         <div class="avatar">${avatar}</div>
         <div class="content">${escaped}${meta}</div>
@@ -1213,6 +1278,88 @@ async function updateSystemStats() {
         document.getElementById('swap-pct').textContent = info.swap.percent + '%';
         setBar('swap-bar', info.swap.percent);
     } catch(e) {}
+}
+
+// ── Chat History ──────────────────────────────────────────
+async function loadHistory() {
+    const container = document.getElementById('history-list');
+    document.getElementById('history-viewer').style.display = 'none';
+    container.style.display = 'block';
+    try {
+        const data = await fetch('/api/chat/history').then(r => r.json());
+        if (!data.sessions || data.sessions.length === 0) {
+            container.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">No saved conversations yet. Chat history is saved when you clear or start a new conversation.</div>';
+            return;
+        }
+        container.innerHTML = data.sessions.map(s => {
+            const date = new Date(s.started_at);
+            const dateStr = date.toLocaleDateString(undefined, {month:'short', day:'numeric', year:'numeric'});
+            const timeStr = date.toLocaleTimeString(undefined, {hour:'2-digit', minute:'2-digit'});
+            const duration = s.total_time > 0 ? `${s.total_time.toFixed(1)}s total` : '';
+            return `
+                <div class="history-row" onclick="viewSession('${s.session_id}')">
+                    <div class="history-info">
+                        <div class="history-date">${dateStr} at ${timeStr}</div>
+                        <div class="history-meta">${s.messages} messages · ${s.inquiries} queries${duration ? ' · ' + duration : ''}</div>
+                    </div>
+                    <div class="history-actions">
+                        <button class="btn btn-sm" onclick="event.stopPropagation();deleteSession('${s.session_id}')">Delete</button>
+                    </div>
+                </div>`;
+        }).join('');
+    } catch(e) {
+        container.innerHTML = '<div style="color:var(--text-dim);">Could not load history.</div>';
+    }
+}
+
+async function viewSession(sessionId) {
+    try {
+        const data = await fetch('/api/chat/history/' + sessionId).then(r => r.json());
+        if (data.error) return;
+        document.getElementById('history-list').style.display = 'none';
+        const viewer = document.getElementById('history-viewer');
+        viewer.style.display = 'block';
+        const msgs = document.getElementById('history-messages');
+
+        // Build timing lookup from inquiries
+        const timings = {};
+        if (data.inquiries) {
+            data.inquiries.forEach(inq => {
+                if (inq.query) timings[inq.query] = inq.total_time;
+            });
+        }
+
+        let html = '';
+        let lastUserMsg = '';
+        for (const m of data.messages) {
+            const avatar = m.role === 'user' ? '👤' : '🤖';
+            const escaped = (m.content || '')
+                .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+                .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
+                .replace(/`([^`]+)`/g, '<code>$1</code>')
+                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+                .replace(/\n/g, '<br>');
+            let meta = '';
+            if (m.role === 'user') {
+                lastUserMsg = m.content || '';
+            } else if (m.role === 'assistant' && lastUserMsg && timings[lastUserMsg] != null) {
+                meta = `<div class="meta"><span class="response-time">${timings[lastUserMsg].toFixed(2)}s</span></div>`;
+            }
+            html += `<div class="message ${m.role}"><div class="avatar">${avatar}</div><div class="content">${escaped}${meta}</div></div>`;
+        }
+        msgs.innerHTML = html;
+    } catch(e) {}
+}
+
+function closeHistoryViewer() {
+    document.getElementById('history-viewer').style.display = 'none';
+    document.getElementById('history-list').style.display = 'block';
+}
+
+async function deleteSession(sessionId) {
+    if (!confirm('Delete this conversation?')) return;
+    await fetch('/api/chat/history/' + sessionId, {method: 'DELETE'});
+    loadHistory();
 }
 
 // ── Init ───────────────────────────────────────────────────
