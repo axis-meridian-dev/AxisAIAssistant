@@ -865,16 +865,30 @@ class Agent:
         self.session_stats = SessionStats()
         self.last_inquiry_stats: InquiryStats | None = None
 
-        # Initialize tools
-        self.tool_instances = {
-            "file_manager": FileManagerTool(config),
-            "web_search": WebSearchTool(config),
-            # "desktop_control": DesktopControlTool(config),
-            # "system_info": SystemInfoTool(config),
-            "knowledge_base": KnowledgeBaseTool(config),
-            "legal_research": LegalResearchTool(config),
-            #"document_writer": DocumentWriterTool(config),
+        # Initialize tools — respect enabled_tools config
+        all_available_tools = {
+            "file_manager": FileManagerTool,
+            "web_search": WebSearchTool,
+            "desktop_control": DesktopControlTool,
+            "system_info": SystemInfoTool,
+            "knowledge_base": KnowledgeBaseTool,
+            "legal_research": LegalResearchTool,
+            "document_writer": DocumentWriterTool,
         }
+        # Default tools that are enabled when not explicitly configured
+        default_enabled = {
+            "file_manager", "web_search", "knowledge_base", "legal_research"
+        }
+        enabled_tools_cfg = config.get("enabled_tools", {})
+        self.tool_instances = {}
+        for name, cls in all_available_tools.items():
+            # Use config if set, otherwise fall back to default
+            if name in enabled_tools_cfg:
+                is_enabled = enabled_tools_cfg[name]
+            else:
+                is_enabled = name in default_enabled
+            if is_enabled:
+                self.tool_instances[name] = cls(config)
 
         # Build tool definitions for Ollama
         self.tools = []
