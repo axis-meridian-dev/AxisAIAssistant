@@ -49,5 +49,11 @@
     "enabled_tools": {
         "document_writer": true,
         "system_info": true
+    },
+    "features": {
+        "autonomous_collection": false,
+        "auto_ingest": false,
+        "strict_legal_mode": true,
+        "allow_external_downloads": false
     }
 }

@@ -41,6 +41,12 @@ DEFAULT_CONFIG = {
         "embed_model": "nomic-embed-text",
         "max_results": 5,
         "auto_watch_dirs": ["~/Documents", "~/Projects", "~/Desktop"]
+    },
+    "features": {
+        "autonomous_collection": False,
+        "auto_ingest": False,
+        "strict_legal_mode": True,
+        "allow_external_downloads": False
     }
 }
 
