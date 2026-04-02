@@ -643,6 +643,8 @@ body {
                     <option value="argument">Argument</option>
                     <option value="write">Write</option>
                 </select>
+                <button class="btn btn-sm" id="chat-mode-toggle" onclick="toggleChatMode()" 
+                        style="font-size:11px;padding:4px 10px;">🖥 Local</button>
                 <span class="model-badge" id="active-model">loading...</span>
                 <button class="btn btn-sm" onclick="clearChat()">Clear</button>
             </div>
@@ -815,7 +817,85 @@ body {
                     <input type="number" class="setting-input" id="setting-search-results" 
                            min="1" max="20" value="5" onchange="saveSettings()">
                 </div>
+            
+
+            <div class="card">
+                <h3>☁️ Cloud Reasoning (Hybrid Mode)</h3>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Cloud Enabled</div>
+                        <div class="setting-desc">Route complex/legal queries to cloud API for better reasoning</div>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="setting-cloud-enabled" onchange="saveCloudSettings()">
+                        <div class="toggle-slider"></div>
+                    </label>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Auto-Route</div>
+                        <div class="setting-desc">Automatically send legal/complex queries to cloud (vs manual "use cloud")</div>
+                    </div>
+                    <label class="toggle">
+                        <input type="checkbox" id="setting-cloud-autoroute" onchange="saveCloudSettings()">
+                        <div class="toggle-slider"></div>
+                    </label>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Provider</div>
+                        <div class="setting-desc">Which cloud API to use</div>
+                    </div>
+                    <select class="setting-input" id="setting-cloud-provider" onchange="saveCloudSettings()">
+                        <option value="anthropic">Anthropic (Claude)</option>
+                        <option value="openai">OpenAI (GPT-4)</option>
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Anthropic Model</div>
+                        <div class="setting-desc">claude-opus-4-6 (best, $5/$25) or claude-sonnet-4-20250514 (fast, $3/$15)</div>
+                    </div>
+                    <select class="setting-input" id="setting-cloud-anthropic-model" onchange="saveCloudSettings()">
+                        <option value="claude-opus-4-6">claude-opus-4-6</option>
+                        <option value="claude-sonnet-4-20250514">claude-sonnet-4-20250514</option>
+                        <option value="claude-haiku-4-5-20251001">claude-haiku-4-5 (cheapest)</option>
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">OpenAI Model</div>
+                        <div class="setting-desc">Used when provider is set to OpenAI</div>
+                    </div>
+                    <select class="setting-input" id="setting-cloud-openai-model" onchange="saveCloudSettings()">
+                        <option value="gpt-4o">gpt-4o</option>
+                        <option value="gpt-4o-mini">gpt-4o-mini (cheapest)</option>
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Monthly Budget</div>
+                        <div class="setting-desc">Maximum monthly spend on cloud API (stops routing when exceeded)</div>
+                    </div>
+                    <input type="number" class="setting-input" id="setting-cloud-budget" 
+                           min="1" max="200" step="5" value="40" onchange="saveCloudSettings()">
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">Monthly Spend</div>
+                        <div class="setting-desc">Current month's cloud API usage</div>
+                    </div>
+                    <span id="cloud-spend-display" style="font-family:var(--font-mono);color:var(--green)">$0.00</span>
+                </div>
+                <div class="setting-row">
+                    <div>
+                        <div class="setting-label">API Key Status</div>
+                        <div class="setting-desc">Set in config/settings.json (never shown in dashboard)</div>
+                    </div>
+                    <span id="cloud-key-status" style="font-family:var(--font-mono);font-size:12px">checking...</span>
+                </div>
             </div>
+</div>
         </div>
     </div>
 
@@ -1148,6 +1228,7 @@ async function loadSettings() {
             });
         }
     } catch(e) {}
+    loadCloudSettings();
 }
 
 async function saveSettings() {
@@ -1360,6 +1441,61 @@ async function deleteSession(sessionId) {
     if (!confirm('Delete this conversation?')) return;
     await fetch('/api/chat/history/' + sessionId, {method: 'DELETE'});
     loadHistory();
+}
+
+
+// ── Cloud Settings ──────────────────────────────────────────────────────
+async function loadCloudSettings() {
+    try {
+        const cloud = await fetch('/api/cloud').then(r=>r.json());
+        document.getElementById('setting-cloud-enabled').checked = cloud.enabled || false;
+        document.getElementById('setting-cloud-autoroute').checked = cloud.auto_route || false;
+        document.getElementById('setting-cloud-provider').value = cloud.provider || 'anthropic';
+        document.getElementById('setting-cloud-anthropic-model').value = cloud.anthropic_model || 'claude-sonnet-4-20250514';
+        document.getElementById('setting-cloud-openai-model').value = cloud.openai_model || 'gpt-4o';
+        document.getElementById('setting-cloud-budget').value = cloud.max_monthly_budget || 40;
+        
+        const spend = cloud.monthly_spend || 0;
+        const budget = cloud.max_monthly_budget || 40;
+        const remaining = cloud.budget_remaining || budget;
+        document.getElementById('cloud-spend-display').textContent = `$${spend.toFixed(2)} / $${budget.toFixed(0)}`;
+        document.getElementById('cloud-spend-display').style.color = 
+            spend/budget > 0.8 ? 'var(--red)' : spend/budget > 0.5 ? 'var(--yellow)' : 'var(--green)';
+        
+        // Key status
+        const hasAnthropicKey = cloud.anthropic_api_key && cloud.anthropic_api_key !== '';
+        const hasOpenAIKey = cloud.openai_api_key && cloud.openai_api_key !== '';
+        const keyEl = document.getElementById('cloud-key-status');
+        if (cloud.provider === 'anthropic') {
+            keyEl.textContent = hasAnthropicKey ? '✓ Anthropic key set' : '✗ No key';
+            keyEl.style.color = hasAnthropicKey ? 'var(--green)' : 'var(--red)';
+        } else {
+            keyEl.textContent = hasOpenAIKey ? '✓ OpenAI key set' : '✗ No key';
+            keyEl.style.color = hasOpenAIKey ? 'var(--green)' : 'var(--red)';
+        }
+    } catch(e) {
+        console.error('Cloud settings error:', e);
+    }
+}
+
+async function saveCloudSettings() {
+    const cfg = {
+        enabled: document.getElementById('setting-cloud-enabled').checked,
+        auto_route: document.getElementById('setting-cloud-autoroute').checked,
+        provider: document.getElementById('setting-cloud-provider').value,
+        anthropic_model: document.getElementById('setting-cloud-anthropic-model').value,
+        openai_model: document.getElementById('setting-cloud-openai-model').value,
+        max_monthly_budget: parseFloat(document.getElementById('setting-cloud-budget').value),
+    };
+    
+    await fetch('/api/cloud', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(cfg)
+    });
+    
+    // Reload to show updated status
+    setTimeout(loadCloudSettings, 500);
 }
 
 // ── Init ───────────────────────────────────────────────────
