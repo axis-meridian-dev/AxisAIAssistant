@@ -67,3 +67,4 @@ chroma/
 *.db
 
 /~/.local/share/ai-assistant/knowledge_db/chroma/*.zip
+config/settings.json
