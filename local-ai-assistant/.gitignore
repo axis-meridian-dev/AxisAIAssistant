@@ -1,45 +1,21 @@
-.venv
-__pycache__
+# Python
+.venv/
+__pycache__/
 *.pyc
 *.pyo
 *.pyd
-*.log
-*.sqlite3
-.DS_Store
-.idea/
-.vscode/
-*.env
-.env.*
-*.bak
-*.tmp
-*.swp
-*.swo
 *.egg-info/
 dist/
 build/
 *.egg
 *.tar.gz
 *.zip
-*.log
-*.cache
-*.coverage
-.coverage.*
-htmlcov/
-.tox/
-.nox/
-.pytest_cache/
-.mypy_cache/
-.pyre/
-.pytype/
-.pyright/
-*.ipynb_checkpoints
-.ipynb_checkpoints/
-*.ipynb
-.ipynb
-# Python
-.venv/
-__pycache__/
-*.pyc
+
+# Environment & Secrets — NEVER commit these
+.env
+.env.*
+*.env
+config/settings.json
 
 # Local AI / Vector DB
 .local/
@@ -58,13 +34,28 @@ Thumbs.db
 
 # Logs
 *.log
-.venv/
-.local/
-knowledge_db/
-chroma/
-*.bin
-*.pickle
-*.db
 
-/~/.local/share/ai-assistant/knowledge_db/chroma/*.zip
-config/settings.json
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*.bak
+*.tmp
+
+# Cache
+*.cache
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.pytest_cache/
+.mypy_cache/
+.pyre/
+.pytype/
+.pyright/
+
+# Notebooks
+*.ipynb_checkpoints
+.ipynb_checkpoints/
