@@ -366,10 +366,12 @@ class Agent:
                     if local_response and len(local_response) > 50:
                         tool_context += f"\n\n[Local Model Analysis]\n{local_response[:2000]}"
                     
+                    selected_model = self.cloud.select_model(user_input, intent, self.current_mode)
                     cloud_response = self.cloud.query(
                         messages=self.history,
                         system_prompt=CLOUD_LEGAL_PROMPT,
                         tool_results=tool_context,
+                        model=selected_model,
                     )
                     
                     if cloud_response:
