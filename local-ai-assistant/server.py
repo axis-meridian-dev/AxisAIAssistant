@@ -77,7 +77,7 @@ def chat():
 
 @app.route("/api/models", methods=["GET"])
 def list_models():
-    """List all locally available Ollama models."""
+    """List all locally available Ollama.current_models."""
     try:
         result = subprocess.run(
             ["ollama", "list"],
@@ -121,7 +121,7 @@ def available_models():
 
 @app.route("/api/models/pull", methods=["POST"])
 def pull_model():
-    """Start downloading a model. Streams progress."""
+    """Start downloading a.current_model. Streams progress."""
     data = request.json
     model_name = data.get("model", "")
     
@@ -196,7 +196,7 @@ def update_config():
 def get_mode():
     """Get current agent mode."""
     a = get_agent()
-    return jsonify({"mode": a.mode})
+    return jsonify({"mode": a.current_mode})
 
 
 @app.route("/api/mode", methods=["POST"])
@@ -205,8 +205,8 @@ def set_mode():
     data = request.json
     mode = data.get("mode", "general")
     a = get_agent()
-    result = a.set_mode(mode)
-    return jsonify({"success": "Invalid" not in result, "mode": a.mode, "message": result})
+    result = setattr(a, "current_mode", mode) or mode
+    return jsonify({"success": "Invalid" not in result, "mode": a.current_mode, "message": result})
 
 
 @app.route("/api/tools", methods=["GET"])

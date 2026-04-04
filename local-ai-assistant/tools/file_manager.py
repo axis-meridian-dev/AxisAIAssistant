@@ -160,11 +160,20 @@ class FileManagerTool(BaseTool):
             
             else:
                 # Search by filename with find
-                cmd = [
-                    "find", str(target), "-maxdepth", "6",
-                    "-iname", f"*{query}*", "-not", "-path", "*/.git/*",
+                # Handle comma-separated patterns (e.g. "*.jpg,*.png,*.mp4")
+                patterns = [q.strip() for q in query.split(",") if q.strip()]
+                cmd = ["find", str(target), "-maxdepth", "6", "("]
+                for i, pat in enumerate(patterns):
+                    if i > 0:
+                        cmd.append("-o")
+                    # If pattern already has a wildcard, use as-is; otherwise wrap
+                    if "*" in pat or "?" in pat:
+                        cmd.extend(["-iname", pat])
+                    else:
+                        cmd.extend(["-iname", f"*{pat}*"])
+                cmd.extend([")", "-not", "-path", "*/.git/*",
                     "-not", "-path", "*/node_modules/*"
-                ]
+                ])
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
                 files = result.stdout.strip().split("\n")[:max_results]
                 files = [f for f in files if f]

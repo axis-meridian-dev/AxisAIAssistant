@@ -18,15 +18,15 @@ Setup:
       "anthropic_api_key": "sk-ant-...",
       "openai_api_key": "sk-...",
       "anthropic_model": "claude-sonnet-4-20250514",
-      "openai_model": "gpt-4o",
+      "openai_model": "gpt-5-nano",
       "enabled": true,
       "auto_route": true,               # Auto-escalate complex queries
-      "max_monthly_budget": 20.00,       # Spending cap
+      "max_monthly_budget": 40.00,       # Spending cap
       "monthly_spend": 0.0
     }
   }
 """
-
+from openai import OpenAI
 import json
 import os
 import time
@@ -41,7 +41,7 @@ PRICING = {
     "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
     "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
     # OpenAI pricing
-    "gpt-4o": {"input": 2.50, "output": 10.0},
+    "gpt-5-nano": {"input": 2.50, "output": 10.0},
     "gpt-4o-mini": {"input": 0.15, "output": 0.60},
 }
 
@@ -55,7 +55,7 @@ class CloudReasoner:
         self.enabled = self.cloud_cfg.get("enabled", False)
         self.provider = self.cloud_cfg.get("provider", "anthropic")
         self.auto_route = self.cloud_cfg.get("auto_route", True)
-        self.max_budget = self.cloud_cfg.get("max_monthly_budget", 20.0)
+        self.max_budget = self.cloud_cfg.get("max_monthly_budget", 40.0)
         
         # Track spending
         self.spend_file = Path.home() / ".local" / "share" / "ai-assistant" / "cloud_spend.json"
@@ -148,10 +148,17 @@ class CloudReasoner:
         if not self.auto_route:
             return False
         if not self.can_afford():
+            # Never route file operations to cloud
             print(f"  [Cloud] Budget exceeded (${self.monthly_spend:.2f} / ${self.max_budget:.2f})", flush=True)
             return False
         
         lower = query.lower()
+
+        # Never route file operations to cloud
+        file_words = ["download", "list", "search files", "ingest", "folder",
+                      "directory", "copy", "move", "delete file", "open file"]
+        if any(w in lower for w in file_words):
+            return False
         
         # Explicit cloud request
         if any(p in lower for p in ["use cloud", "use claude", "use gpt", "cloud mode",
@@ -261,7 +268,7 @@ class CloudReasoner:
         if not client:
             return None
         
-        model = self.cloud_cfg.get("openai_model", "gpt-4o")
+        model = self.cloud_cfg.get("openai_model", "gpt-5-nano")
         
         # Build message list for OpenAI format
         api_messages = [{"role": "system", "content": system_prompt}]
