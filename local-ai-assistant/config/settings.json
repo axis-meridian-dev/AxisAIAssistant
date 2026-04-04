@@ -36,7 +36,7 @@
         "clipboard_enabled": true
     },
     "knowledge_base": {
-        "db_path": "~/.local/share/ai-assistant/knowledge_db",
+        "db_path": "/home/axmh/.local/share/ai-assistant/knowledge_db",
         "chunk_size": 1000,
         "chunk_overlap": 200,
         "embed_model": "nomic-embed-text",
@@ -55,8 +55,8 @@
     },
     "cloud": {
         "provider": "anthropic",
-        "anthropic_api_key": "",
-        "openai_api_key": "",
+        "anthropic_api_key": "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",
+        "openai_api_key": "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",
         "anthropic_model": "claude-opus-4-6",
         "openai_model": "gpt-4o",
         "enabled": true,

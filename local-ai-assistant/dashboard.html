@@ -943,6 +943,27 @@ document.querySelectorAll('.nav-item').forEach(item => {
     });
 });
 
+// ── Cloud Chat Mode ──────────────────────────────────────
+let chatMode = 'local';
+let cloudHistory = [];
+
+function toggleChatMode() {
+    chatMode = chatMode === 'local' ? 'cloud' : 'local';
+    const btn = document.getElementById('chat-mode-toggle');
+    if (chatMode === 'cloud') {
+        btn.textContent = '☁️ Cloud';
+        btn.style.background = 'var(--accent-glow)';
+        btn.style.borderColor = 'var(--accent)';
+        btn.style.color = 'var(--accent)';
+        document.getElementById('active-model').textContent = 'claude (cloud)';
+    } else {
+        btn.textContent = '🖥 Local';
+        btn.style.background = '';
+        btn.style.borderColor = '';
+        btn.style.color = '';
+    }
+}
+
 // ── Chat ───────────────────────────────────────────────────
 async function sendMessage() {
     const input = document.getElementById('chat-input');
@@ -959,13 +980,29 @@ async function sendMessage() {
     procText.textContent = 'Sending to LLM...';
     
     try {
-        const res = await fetch('/api/chat', {
-            method: 'POST',
-            headers: {'Content-Type': 'application/json'},
-            body: JSON.stringify({message: msg})
-        });
-        const data = await res.json();
-        addMessage('assistant', data.response, data.model, data.response_time);
+        let data;
+        if (chatMode === 'cloud') {
+            procText.textContent = 'Sending to Claude API...';
+            const res = await fetch('/api/chat/cloud', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({message: msg, history: cloudHistory})
+            });
+            data = await res.json();
+            cloudHistory.push({role: 'user', content: msg});
+            cloudHistory.push({role: 'assistant', content: data.response});
+            if (cloudHistory.length > 40) cloudHistory = cloudHistory.slice(-30);
+            const costInfo = data.cost ? ' · $' + data.cost.toFixed(4) : '';
+            addMessage('assistant', data.response, (data.model || 'cloud') + costInfo, null);
+        } else {
+            const res = await fetch('/api/chat', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({message: msg})
+            });
+            data = await res.json();
+            addMessage('assistant', data.response, data.model, data.response_time);
+        }
     } catch(e) {
         addMessage('assistant', 'Error: Could not reach the server. Is server.py running?');
     }
