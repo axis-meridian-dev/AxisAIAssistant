@@ -398,7 +398,7 @@ class KnowledgeBaseTool(BaseTool):
             embeddings.extend(response["embeddings"])
         return embeddings
     
-    # ── Public methods (exposed as tools) ───────────────────────────────────
+    # ── Public methods (exposed as tools) ───────────────��───────────────────
     
     def ingest_directory(self, path: str = "~", recursive: bool = True,
                          file_types: str = "all") -> str:
@@ -453,6 +453,9 @@ class KnowledgeBaseTool(BaseTool):
         errors = 0
         total_chunks = 0
         
+        # Build a set of already-ingested content hashes for cross-directory dedup
+        seen_hashes = {info["hash"] for info in self.manifest["files"].values()}
+        
         for file_idx, filepath in enumerate(files):
             try:
                 fhash = file_hash(filepath)
@@ -461,7 +464,7 @@ class KnowledgeBaseTool(BaseTool):
                 # Progress output every file
                 print(f"  [{file_idx+1}/{len(files)}] {filepath.name}...", end=" ", flush=True)
                 
-                # Skip if already ingested and unchanged
+                # Skip if already ingested at this path and unchanged
                 if str_path in self.manifest["files"]:
                     if self.manifest["files"][str_path]["hash"] == fhash:
                         skipped += 1
@@ -470,6 +473,12 @@ class KnowledgeBaseTool(BaseTool):
                     else:
                         # File changed — remove old chunks and re-ingest
                         self._remove_file_chunks(str_path)
+                
+                # Skip if same content already ingested from a different path
+                elif fhash in seen_hashes:
+                    skipped += 1
+                    print("(duplicate content, skipped)")
+                    continue
                 
                 # Read file
                 content = read_file_content(filepath)
@@ -538,6 +547,7 @@ class KnowledgeBaseTool(BaseTool):
                 
                 ingested += 1
                 total_chunks += len(chunks)
+                seen_hashes.add(fhash)
                 print(f"OK ({len(chunks)} chunks)")
                 
                 # Save manifest every 25 files so progress isn't lost on crash

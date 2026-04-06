@@ -141,6 +141,17 @@ class LegalResearchTool(BaseTool):
             follow_redirects=True,
             timeout=30
         )
+        
+        # Shared web search tool instance (lazy-loaded)
+        self._web_search = None
+    
+    @property
+    def web_search(self):
+        """Reuse a single WebSearchTool instance instead of creating new ones."""
+        if self._web_search is None:
+            from tools.web_search import WebSearchTool
+            self._web_search = WebSearchTool(self.config)
+        return self._web_search
     
     # ── Federal Statute Lookup ──────────────────────────────────────────────
     
@@ -239,8 +250,7 @@ class LegalResearchTool(BaseTool):
     
     def _search_statutes_online(self, query: str) -> str:
         """Search for statutes using web search."""
-        from tools.web_search import WebSearchTool
-        ws = WebSearchTool(self.config)
+        ws = self.web_search
         
         # Add legal context to search
         legal_query = f"{query} site:law.cornell.edu OR site:cga.ct.gov OR site:law.justia.com"
@@ -364,8 +374,7 @@ class LegalResearchTool(BaseTool):
         Search for legal/crime statistics from DOJ, FBI UCR, BJS, 
         and other government sources.
         """
-        from tools.web_search import WebSearchTool
-        ws = WebSearchTool(self.config)
+        ws = self.web_search
         
         # Build targeted queries for statistical sources
         queries = [
@@ -460,8 +469,7 @@ class LegalResearchTool(BaseTool):
         Search recent news on legal topics — civil rights, police,
         court decisions, legislation.
         """
-        from tools.web_search import WebSearchTool
-        ws = WebSearchTool(self.config)
+        ws = self.web_search
         
         # Build news-focused queries
         queries = [

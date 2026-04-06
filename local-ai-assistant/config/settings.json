@@ -1,0 +1,65 @@
+{
+    "llm": {
+        "primary_model": "qwen2.5:14b",
+        "fast_model": "llama3.1:8b",
+        "ollama_host": "http://localhost:11434",
+        "temperature": 0.3,
+        "context_window": 16384
+    },
+    "search": {
+        "searxng_url": "http://localhost:8888",
+        "fallback_to_ddg": true,
+        "max_results": 5
+    },
+    "voice": {
+        "enabled": false,
+        "wake_word": "computer",
+        "stt_model": "base.en",
+        "tts_voice": "en_US-lessac-medium",
+        "push_to_talk_key": "ctrl+space"
+    },
+    "files": {
+        "allowed_roots": [
+            "~"
+        ],
+        "excluded_dirs": [
+            ".git",
+            "node_modules",
+            "__pycache__",
+            ".cache"
+        ],
+        "max_file_size_mb": 50
+    },
+    "desktop": {
+        "screenshot_enabled": true,
+        "app_launch_enabled": true,
+        "clipboard_enabled": true
+    },
+    "knowledge_base": {
+        "db_path": "/home/axmh/.local/share/ai-assistant/knowledge_db",
+        "chunk_size": 1000,
+        "chunk_overlap": 200,
+        "embed_model": "nomic-embed-text",
+        "max_results": 5,
+        "auto_watch_dirs": [
+            "~/Documents",
+            "~/Projects",
+            "~/Desktop"
+        ]
+    },
+    "features": {
+        "autonomous_collection": true,
+        "auto_ingest": true,
+        "strict_legal_mode": true,
+        "allow_external_downloads": true
+    },
+    "cloud": {
+        "provider": "anthropic",
+        "anthropic_model": "claude-opus-4-6",
+        "openai_model": "gpt-4o",
+        "enabled": true,
+        "auto_route": true,
+        "max_monthly_budget": 40.0,
+        "monthly_spend": 0.0
+    }
+}
