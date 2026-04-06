@@ -28,6 +28,7 @@ from tools.knowledge_base import KnowledgeBaseTool
 from tools.legal_research import LegalResearchTool
 from tools.document_writer import DocumentWriterTool
 from cloud_reasoning import CloudReasoner
+from stats import SessionStats, InquiryStats, StatsTimer
 
 console = Console()
 
@@ -221,6 +222,9 @@ class Agent:
         self.history: list[dict] = []
         self.ollama_host = config["llm"]["ollama_host"]
         self.current_mode = "general"
+        self.session_stats = SessionStats()
+        self.last_inquiry_stats = None
+        self.mode = self.current_mode
         
         # Cloud reasoning layer
         self.cloud = CloudReasoner(config)
@@ -260,6 +264,9 @@ class Agent:
     def clear_history(self):
         self.history = []
         self.current_mode = "general"
+        self.session_stats = SessionStats()
+        self.last_inquiry_stats = None
+        self.mode = self.current_mode
     
     async def process(self, user_input: str) -> str:
         """Process user input through the hybrid agent loop."""

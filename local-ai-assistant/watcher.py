@@ -83,9 +83,11 @@ def main():
         home = Path.home()
         watch_dirs = [
             home / "Documents",
-            home / "Projects",
+            home / "LegalResearch",
             home / "Desktop",
-            home / "Notes",
+            home / "Development",
+            home / "Documents",
+            home / "Pictures",
         ]
     
     # Filter to only directories that actually exist and are accessible
