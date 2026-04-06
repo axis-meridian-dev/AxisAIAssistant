@@ -14,11 +14,14 @@ The local model is the "hands" — it knows which tools to call.
 The cloud model is the "brain" — it does the deep reasoning and writing.
 """
 
+import logging
 import re
 import json
 import ollama
 from rich.console import Console
 from rich.table import Table
+
+logger = logging.getLogger("ai_assistant.agent")
 
 from tools.file_manager import FileManagerTool
 from tools.web_search import WebSearchTool
@@ -28,6 +31,7 @@ from tools.knowledge_base import KnowledgeBaseTool
 from tools.legal_research import LegalResearchTool
 from tools.document_writer import DocumentWriterTool
 from cloud_reasoning import CloudReasoner
+from stats import SessionStats, InquiryStats, StatsTimer
 
 console = Console()
 
@@ -221,12 +225,16 @@ class Agent:
         self.history: list[dict] = []
         self.ollama_host = config["llm"]["ollama_host"]
         self.current_mode = "general"
-        
+        self.session_stats = SessionStats()
+        self.last_inquiry_stats = None
+        self.mode = self.current_mode
+        self.cloud_model_override: str | None = None  # user-selected model
+
         # Cloud reasoning layer
         self.cloud = CloudReasoner(config)
         
         # Initialize tools
-        self.tool_instances = {
+        self._all_tool_instances = {
             "file_manager": FileManagerTool(config),
             "web_search": WebSearchTool(config),
             "desktop_control": DesktopControlTool(config),
@@ -235,15 +243,28 @@ class Agent:
             "legal_research": LegalResearchTool(config),
             "document_writer": DocumentWriterTool(config),
         }
-        
+        self.tool_instances = dict(self._all_tool_instances)
+
+        # Apply tool toggles from config
+        self.apply_tool_toggles(config.get("enabled_tools", {}))
+    
+    def apply_tool_toggles(self, enabled_tools: dict):
+        """Rebuild active tools based on enabled_tools config."""
+        self.tool_instances = {
+            name: inst for name, inst in self._all_tool_instances.items()
+            if enabled_tools.get(name, True)
+        }
+        self._rebuild_tool_index()
+
+    def _rebuild_tool_index(self):
+        """Rebuild tool definitions and handler lookup from active instances."""
         self.tools = []
         for instance in self.tool_instances.values():
             self.tools.extend(instance.get_tool_definitions())
-        
         self.tool_handlers = {}
         for instance in self.tool_instances.values():
             self.tool_handlers.update(instance.get_handlers())
-    
+
     def list_tools(self) -> list[str]:
         return list(self.tool_instances.keys())
     
@@ -257,9 +278,43 @@ class Agent:
         console.print(table)
         console.print(f"\n{self.cloud.get_status()}")
     
+    def set_mode(self, new_mode: str) -> str:
+        """Change the agent's operating mode."""
+        valid_modes = ("research", "analysis", "argument", "write", "general")
+        new_mode = new_mode.strip().lower()
+        if new_mode in valid_modes:
+            self.current_mode = new_mode
+            self.mode = new_mode
+            logger.info("Mode changed to %s", new_mode)
+            return f"Mode set to: {new_mode}"
+        return f"Invalid mode '{new_mode}'. Choose from: {', '.join(valid_modes)}"
+
+    def load_session(self, session_id: str) -> bool:
+        """Load and resume a previous chat session."""
+        data = self.session_stats.resume_session(session_id)
+        if data:
+            self.history = data.get("messages", [])
+            return True
+        return False
+
+    def new_session(self):
+        """Start a fresh session (like clicking 'New Chat' in ChatGPT)."""
+        # Save current session first if it has content
+        if self.history:
+            self.session_stats.save_chat_session(self.history)
+        self.history = []
+        self.current_mode = "general"
+        self.mode = "general"
+        self.cloud_model_override = None
+        self.session_stats = SessionStats()
+        self.last_inquiry_stats = None
+
     def clear_history(self):
         self.history = []
         self.current_mode = "general"
+        self.session_stats = SessionStats()
+        self.last_inquiry_stats = None
+        self.mode = self.current_mode
     
     async def process(self, user_input: str) -> str:
         """Process user input through the hybrid agent loop."""
@@ -313,6 +368,7 @@ class Agent:
                 )
             except Exception as e:
                 error_msg = f"LLM error: {e}"
+                logger.error("Ollama call failed: %s", e)
                 print(f"  [ERROR] {error_msg}", flush=True)
                 return error_msg
             
@@ -347,6 +403,7 @@ class Agent:
                             )
                         except Exception as e:
                             result = f"Tool error: {e}"
+                            logger.error("Tool %s failed: %s", func_name, e)
                             print(f"    ✗ {result}", flush=True)
                     else:
                         result = f"Unknown tool: {func_name}"
@@ -366,7 +423,7 @@ class Agent:
                     if local_response and len(local_response) > 50:
                         tool_context += f"\n\n[Local Model Analysis]\n{local_response[:2000]}"
                     
-                    selected_model = self.cloud.select_model(user_input, intent, self.current_mode)
+                    selected_model = self.cloud_model_override or self.cloud.select_model(user_input, intent, self.current_mode)
                     cloud_response = self.cloud.query(
                         messages=self.history,
                         system_prompt=CLOUD_LEGAL_PROMPT,
@@ -387,10 +444,16 @@ class Agent:
                 final = validate_and_patch(final, intent, self.current_mode)
                 
                 self.history.append({"role": "assistant", "content": final})
-                
+
+                # Auto-save after every exchange
+                self.session_stats.save_chat_session(self.history)
+
                 if len(self.history) > 40:
                     self.history = self.history[-30:]
-                
+                    self._history_truncated = True
+                else:
+                    self._history_truncated = False
+
                 return final
         
         return "Reached maximum tool iterations. Please try a simpler request."

@@ -120,6 +120,7 @@ python watcher.py ~/Documents ~/Desktop ~/LegalResearch
 
 ```bash
 sudo cp scripts/local-ai-assistant.service /etc/systemd/system/
+sudo systemctl daemon-reload
 sudo systemctl enable --now local-ai-assistant
 ```
 
@@ -333,10 +334,17 @@ This system enforces strict rules for legal output:
 local-ai-assistant/
 ├── main.py                  # Entry point — CLI and voice loops
 ├── agent.py                 # Core agent — LLM + tool dispatch + system prompt
+├── server.py                # Flask web dashboard server
 ├── config.py                # Configuration loader with defaults
+├── config_utils.py          # Safe config writing (strips API keys)
+├── cloud_reasoning.py       # Multi-provider cloud routing (Anthropic/OpenAI)
 ├── watcher.py               # File watcher — auto-ingest on changes
+├── stats.py                 # Per-inquiry and session performance metrics
+├── voice.py                 # Whisper STT + Piper TTS + wake word
 ├── config/
 │   └── settings.json        # User configuration
+├── templates/
+│   └── dashboard.html       # Web dashboard front-end
 ├── tools/
 │   ├── base.py              # Abstract base tool class
 │   ├── file_manager.py      # File operations (10 tools)
@@ -349,7 +357,14 @@ local-ai-assistant/
 ├── scripts/
 │   ├── setup.sh             # Full install script
 │   ├── setup_knowledge_base.sh
-│   └── local-ai-assistant.service
+│   ├── install.sh           # File placement helper for fresh installs
+│   ├── local-ai-assistant.service  # systemd service unit
+│   ├── bulk_download.py     # Bulk legal content downloader (v1)
+│   ├── bulk_download_v2.py  # Bulk legal content downloader (v2, fixed URLs)
+│   ├── fine_tune_generator.py      # OpenAI fine-tuning JSONL generator
+│   └── patches/             # One-shot migration scripts (already applied)
+│       ├── patch_cloud_chat.py
+│       └── patch_cloud_dashboard.py
 └── searxng/
     ├── docker-compose.yml
     └── settings.yml

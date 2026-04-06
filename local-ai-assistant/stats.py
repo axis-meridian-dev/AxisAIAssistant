@@ -170,11 +170,37 @@ class SessionStats:
 
     # ── Chat History ──────────────────────────────────────────────────
 
-    def save_chat_session(self, history: list[dict]):
-        """Save the current chat session to disk."""
-        session_file = self.history_dir / f"chat_{self.session_id}.json"
+    def _session_file(self) -> Path:
+        return self.history_dir / f"chat_{self.session_id}.json"
+
+    def _make_title(self, history: list[dict]) -> str:
+        """Generate a title from the first user message."""
+        for msg in history:
+            if msg.get("role") == "user":
+                text = msg["content"].strip()
+                if len(text) > 80:
+                    return text[:77] + "..."
+                return text
+        return "Untitled"
+
+    def save_chat_session(self, history: list[dict], title: str = None):
+        """Save the current chat session to disk. Called after every exchange."""
+        session_file = self._session_file()
+
+        # Preserve existing title if not explicitly set
+        if title is None and session_file.exists():
+            try:
+                with open(session_file) as f:
+                    existing = json.load(f)
+                title = existing.get("title")
+            except Exception:
+                pass
+        if title is None:
+            title = self._make_title(history)
+
         session_data = {
             "session_id": self.session_id,
+            "title": title,
             "started_at": self.session_start,
             "saved_at": datetime.now().isoformat(),
             "messages": history,
@@ -185,8 +211,29 @@ class SessionStats:
         with open(session_file, "w") as f:
             json.dump(session_data, f, indent=2)
 
-    def list_chat_sessions(self, limit: int = 10) -> list[dict]:
-        """List recent chat sessions."""
+    def rename_session(self, new_title: str):
+        """Rename the current session."""
+        session_file = self._session_file()
+        if session_file.exists():
+            with open(session_file) as f:
+                data = json.load(f)
+            data["title"] = new_title
+            with open(session_file, "w") as f:
+                json.dump(data, f, indent=2)
+
+    def delete_chat_session(self, session_id: str) -> bool:
+        """Delete a chat session by ID."""
+        session_file = self.history_dir / f"chat_{session_id}.json"
+        if session_file.exists():
+            session_file.unlink()
+            return True
+        for f in self.history_dir.glob(f"chat_*{session_id}*.json"):
+            f.unlink()
+            return True
+        return False
+
+    def list_chat_sessions(self, limit: int = 20) -> list[dict]:
+        """List recent chat sessions, newest first."""
         sessions = []
         for f in sorted(self.history_dir.glob("chat_*.json"), reverse=True)[:limit]:
             try:
@@ -195,6 +242,7 @@ class SessionStats:
                 sessions.append({
                     "file": f.name,
                     "session_id": data.get("session_id", "?"),
+                    "title": data.get("title", "Untitled"),
                     "started_at": data.get("started_at", "?"),
                     "messages": len(data.get("messages", [])),
                     "inquiries": data.get("inquiry_count", 0),
@@ -205,7 +253,7 @@ class SessionStats:
         return sessions
 
     def load_chat_session(self, session_id: str) -> dict | None:
-        """Load a specific chat session by ID."""
+        """Load a specific chat session by ID or partial match."""
         session_file = self.history_dir / f"chat_{session_id}.json"
         if session_file.exists():
             with open(session_file) as f:
@@ -215,6 +263,20 @@ class SessionStats:
             with open(f) as fh:
                 return json.load(fh)
         return None
+
+    def resume_session(self, session_id: str) -> dict | None:
+        """Load a session and set it as the current active session."""
+        data = self.load_chat_session(session_id)
+        if data:
+            self.session_id = data["session_id"]
+            self.session_start = data.get("started_at", datetime.now().isoformat())
+            # Restore inquiry stats
+            self.inquiries = []
+            for iq in data.get("inquiries", []):
+                stats = InquiryStats(**{k: v for k, v in iq.items()
+                                        if k in InquiryStats.__dataclass_fields__})
+                self.inquiries.append(stats)
+        return data
 
     # ── Display Helpers ───────────────────────────────────────────────
 

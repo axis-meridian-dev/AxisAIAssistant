@@ -22,11 +22,14 @@ Setup:
 """
 
 import json
+import logging
 import os
 import time
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
+
+logger = logging.getLogger("ai_assistant.cloud")
 
 # ── Model Registry ──────────────────────────────────────────────────────────
 
@@ -206,11 +209,11 @@ class CloudReasoner:
         self.default_anthropic = self.cloud_cfg.get("anthropic_model", "claude-sonnet-4-20250514")
         self.default_openai = self.cloud_cfg.get("openai_model", "gpt-5")
         
-        # Track spending
+        # Per-provider balance tracking
         self.spend_file = Path.home() / ".local" / "share" / "ai-assistant" / "cloud_spend.json"
         self.spend_file.parent.mkdir(parents=True, exist_ok=True)
         self._load_spend()
-        
+
         # Lazy-load API clients
         self._anthropic = None
         self._openai = None
@@ -246,108 +249,146 @@ class CloudReasoner:
     # ── Spending Tracker ────────────────────────────────────────────────
     
     def _load_spend(self):
+        """Load per-provider balance and spend data."""
+        default_balances = self.cloud_cfg.get("balances", {})
         if self.spend_file.exists():
             with open(self.spend_file) as f:
                 data = json.load(f)
+            # Reset on new month
             if data.get("month") != datetime.now().strftime("%Y-%m"):
                 self.monthly_spend = 0.0
+                self.provider_spend = {"anthropic": 0.0, "openai": 0.0}
+                self.provider_balances = {
+                    "anthropic": default_balances.get("anthropic", 40.0),
+                    "openai": default_balances.get("openai", 20.0),
+                }
                 self._save_spend()
             else:
                 self.monthly_spend = data.get("spend", 0.0)
+                self.provider_spend = data.get("provider_spend", {"anthropic": 0.0, "openai": 0.0})
+                self.provider_balances = data.get("provider_balances", {
+                    "anthropic": default_balances.get("anthropic", 40.0),
+                    "openai": default_balances.get("openai", 20.0),
+                })
         else:
             self.monthly_spend = 0.0
-    
+            self.provider_spend = {"anthropic": 0.0, "openai": 0.0}
+            self.provider_balances = {
+                "anthropic": default_balances.get("anthropic", 40.0),
+                "openai": default_balances.get("openai", 20.0),
+            }
+
     def _save_spend(self):
         with open(self.spend_file, "w") as f:
             json.dump({
                 "month": datetime.now().strftime("%Y-%m"),
                 "spend": round(self.monthly_spend, 4),
+                "provider_spend": {k: round(v, 4) for k, v in self.provider_spend.items()},
+                "provider_balances": {k: round(v, 4) for k, v in self.provider_balances.items()},
                 "updated": datetime.now().isoformat(),
             }, f, indent=2)
-    
+
     def _track_cost(self, model: str, input_tokens: int, output_tokens: int) -> float:
         model_info = MODELS.get(model, {})
+        provider = model_info.get("provider", "openai")
         input_rate = model_info.get("input", 5.0)
         output_rate = model_info.get("output", 15.0)
-        cost = (input_tokens / 1_000_000 * input_rate + 
+        cost = (input_tokens / 1_000_000 * input_rate +
                 output_tokens / 1_000_000 * output_rate)
+
+        # Update totals
         self.monthly_spend += cost
+        self.provider_spend[provider] = self.provider_spend.get(provider, 0.0) + cost
+        self.provider_balances[provider] = self.provider_balances.get(provider, 0.0) - cost
         self._save_spend()
-        remaining = max(0, self.max_budget - self.monthly_spend)
-        print(f"  [Cloud] Cost: ${cost:.4f} | Monthly: ${self.monthly_spend:.2f} / ${self.max_budget:.2f} (${remaining:.2f} left)", flush=True)
+
+        bal_a = self.provider_balances.get("anthropic", 0)
+        bal_o = self.provider_balances.get("openai", 0)
+        print(f"  [Cloud] Cost: ${cost:.4f} | Balances: Anthropic ${bal_a:.2f} · OpenAI ${bal_o:.2f}", flush=True)
         return cost
-    
+
     def can_afford(self, model: str = None) -> bool:
-        if self.monthly_spend >= self.max_budget:
-            return False
+        """Check if there's enough provider balance for at least one query."""
         if model and model in MODELS:
-            # Estimate: can we afford at least one query?
             info = MODELS[model]
+            provider = info["provider"]
+            balance = self.provider_balances.get(provider, 0.0)
             min_cost = (2000 / 1_000_000 * info["input"] + 1000 / 1_000_000 * info["output"])
-            return (self.max_budget - self.monthly_spend) > min_cost
-        return True
+            return balance > min_cost
+        # General check: any provider has funds
+        return any(b > 0.01 for b in self.provider_balances.values())
+
+    def get_balances(self) -> dict[str, float]:
+        """Return current per-provider balances."""
+        return dict(self.provider_balances)
     
     # ── Smart Model Selection ───────────────────────────────────────────
     
+    def _first_affordable(self, candidates: list[str]) -> str | None:
+        """Return the first model from candidates that fits the budget."""
+        for model_id in candidates:
+            if self.can_afford(model_id):
+                return model_id
+        return None
+
     def select_model(self, query: str, intent: str, mode: str) -> str:
         """
         Pick the best model based on task, budget, and available providers.
+        Cascades from preferred to cheaper models when budget is tight.
         Returns model ID string.
         """
         lower = query.lower()
-        
+
+        # Budget-aware fallback chain (expensive → cheap)
+        ANTHROPIC_CASCADE = ["claude-opus-4-6", "claude-sonnet-4-20250514", "claude-haiku-4-5-20251001"]
+        OPENAI_CASCADE = ["gpt-5", "gpt-5-mini", "gpt-5-nano"]
+        REASONING_CASCADE = ["o3", "o4-mini", "o3-mini", "gpt-5"]
+        FULL_CASCADE = ["claude-opus-4-6", "claude-sonnet-4-20250514", "gpt-5", "claude-haiku-4-5-20251001", "gpt-5-mini", "gpt-5-nano"]
+
         # Explicit model request
         for model_id, info in MODELS.items():
             if model_id in lower or info["name"].lower() in lower:
                 if self.can_afford(model_id):
                     return model_id
-        
+                # Requested model too expensive — cascade within its provider
+                provider_cascade = ANTHROPIC_CASCADE if info["provider"] == "anthropic" else OPENAI_CASCADE
+                fallback = self._first_affordable(provider_cascade)
+                if fallback:
+                    return fallback
+
         # Explicit provider request
         if any(p in lower for p in ["use claude", "use anthropic"]):
-            return self.default_anthropic
+            return self._first_affordable(ANTHROPIC_CASCADE) or self.default_anthropic
         if any(p in lower for p in ["use gpt", "use openai", "use o3", "use reasoning"]):
             if "o3" in lower or "reasoning" in lower:
-                return "o3"
-            return self.default_openai
-        
+                return self._first_affordable(REASONING_CASCADE) or "gpt-5-mini"
+            return self._first_affordable(OPENAI_CASCADE) or self.default_openai
+
         # Premium legal document generation
         if any(p in lower for p in ["write a brief", "write a memo", "legal memorandum",
                                      "draft a motion", "final document", "full power"]):
-            if self.can_afford("claude-opus-4-6"):
-                return "claude-opus-4-6"
-            return "claude-sonnet-4-20250514"
-        
+            return self._first_affordable(["claude-opus-4-6", "claude-sonnet-4-20250514", "gpt-5", "gpt-5-mini"]) or "gpt-5-mini"
+
         # Complex reasoning (multi-step legal logic)
         if any(p in lower for p in ["analyze this case", "build arguments", "both sides",
                                      "evaluate the strength", "compare these cases",
                                      "what are my options", "step by step"]):
-            if self.can_afford("o3"):
-                return "o3"
-            if self.can_afford("gpt-5"):
-                return "gpt-5"
-            return "claude-sonnet-4-20250514"
-        
+            return self._first_affordable(REASONING_CASCADE) or "gpt-5-mini"
+
         # Legal analysis (standard)
         if intent == "legal" and mode in ("analysis", "argument", "writing"):
-            # Rotate between providers based on budget
-            budget_pct = self.monthly_spend / self.max_budget if self.max_budget > 0 else 1
-            if budget_pct < 0.5:
-                return "claude-sonnet-4-20250514"  # Best legal quality
-            elif budget_pct < 0.8:
-                return "gpt-5"  # Cheaper but still strong
-            else:
-                return "gpt-5-mini"  # Budget mode
-        
+            return self._first_affordable(["claude-sonnet-4-20250514", "gpt-5", "gpt-5-mini"]) or "gpt-5-mini"
+
         # Research mode (raw sources)
         if mode == "research":
-            return "gpt-5-mini"  # Don't need heavy reasoning for fetching
-        
+            return self._first_affordable(["gpt-5-mini", "gpt-5-nano"]) or "gpt-5-mini"
+
         # Simple tasks
         if intent in ("general", "technical"):
-            return "gpt-5-mini"
-        
-        # Default: balanced choice
-        return self.default_openai if self.provider == "openai" else self.default_anthropic
+            return self._first_affordable(["gpt-5-mini", "gpt-5-nano"]) or "gpt-5-mini"
+
+        # Default: cascade through all models
+        return self._first_affordable(FULL_CASCADE) or self.default_openai
     
     def should_use_cloud(self, query: str, intent: str, mode: str) -> bool:
         """Decide if cloud should handle this query."""
@@ -412,11 +453,12 @@ class CloudReasoner:
             return None
     
     def _query_anthropic(self, messages: list, system_prompt: str,
-                          tool_results: str = "", model: str = "claude-sonnet-4-20250514") -> Optional[str]:
+                          tool_results: str = "", model: str = "claude-sonnet-4-20250514",
+                          max_retries: int = 3) -> Optional[str]:
         client = self.anthropic_client
         if not client:
             return None
-        
+
         # Build message list
         api_messages = []
         for msg in messages:
@@ -426,13 +468,13 @@ class CloudReasoner:
                 api_messages.append({"role": "assistant", "content": msg["content"]})
             elif msg["role"] == "tool":
                 api_messages.append({"role": "user", "content": f"[Tool Result]\n{msg['content']}"})
-        
+
         if tool_results:
             if api_messages and api_messages[-1]["role"] == "user":
                 api_messages[-1]["content"] += f"\n\n[Research Data from Local Tools]\n{tool_results}"
             else:
                 api_messages.append({"role": "user", "content": f"[Research Data]\n{tool_results}"})
-        
+
         # Ensure alternating roles
         cleaned = []
         for msg in api_messages:
@@ -442,84 +484,99 @@ class CloudReasoner:
                 cleaned.append(msg)
         if cleaned and cleaned[0]["role"] != "user":
             cleaned.insert(0, {"role": "user", "content": "(continuing conversation)"})
-        
-        try:
-            start = time.time()
-            response = client.messages.create(
-                model=model,
-                max_tokens=8192,
-                system=system_prompt,
-                messages=cleaned,
-            )
-            elapsed = time.time() - start
-            
-            result = ""
-            for block in response.content:
-                if hasattr(block, "text"):
-                    result += block.text
-            
-            cost = self._track_cost(model, response.usage.input_tokens, response.usage.output_tokens)
-            print(f"  [Cloud] {len(result)} chars in {elapsed:.1f}s "
-                  f"({response.usage.input_tokens} in / {response.usage.output_tokens} out)", flush=True)
-            
-            return result
-        except Exception as e:
-            print(f"  [Cloud] Anthropic error: {e}", flush=True)
-            return None
+
+        for attempt in range(max_retries):
+            try:
+                start = time.time()
+                response = client.messages.create(
+                    model=model,
+                    max_tokens=8192,
+                    system=system_prompt,
+                    messages=cleaned,
+                )
+                elapsed = time.time() - start
+
+                result = ""
+                for block in response.content:
+                    if hasattr(block, "text"):
+                        result += block.text
+
+                cost = self._track_cost(model, response.usage.input_tokens, response.usage.output_tokens)
+                print(f"  [Cloud] {len(result)} chars in {elapsed:.1f}s "
+                      f"({response.usage.input_tokens} in / {response.usage.output_tokens} out)", flush=True)
+
+                return result
+            except Exception as e:
+                wait = 2 ** attempt
+                logger.warning("Anthropic attempt %d/%d failed: %s", attempt + 1, max_retries, e)
+                print(f"  [Cloud] Anthropic error (attempt {attempt + 1}/{max_retries}): {e}", flush=True)
+                if attempt < max_retries - 1:
+                    print(f"  [Cloud] Retrying in {wait}s...", flush=True)
+                    time.sleep(wait)
+
+        logger.error("Anthropic query failed after %d attempts", max_retries)
+        return None
     
     def _query_openai(self, messages: list, system_prompt: str,
-                       tool_results: str = "", model: str = "gpt-5") -> Optional[str]:
+                       tool_results: str = "", model: str = "gpt-5",
+                       max_retries: int = 3) -> Optional[str]:
         client = self.openai_client
         if not client:
             return None
-        
+
         # Build message list
         api_messages = [{"role": "system", "content": system_prompt}]
-        
+
         for msg in messages:
             if msg["role"] in ("user", "assistant"):
                 api_messages.append({"role": msg["role"], "content": msg["content"]})
             elif msg["role"] == "tool":
                 api_messages.append({"role": "user", "content": f"[Tool Result]\n{msg['content']}"})
-        
+
         if tool_results:
             api_messages.append({"role": "user", "content": f"[Research Data]\n{tool_results}"})
-        
+
         # Reasoning models (o3, o4-mini) don't support system messages the same way
         is_reasoning = model.startswith("o3") or model.startswith("o4")
         if is_reasoning:
-            # Merge system prompt into first user message
             system_content = api_messages.pop(0)["content"]
             if api_messages and api_messages[0]["role"] == "user":
                 api_messages[0]["content"] = f"[Instructions]\n{system_content}\n\n[Query]\n{api_messages[0]['content']}"
             else:
                 api_messages.insert(0, {"role": "user", "content": system_content})
-        
-        try:
-            start = time.time()
-            
-            kwargs = {
-                "model": model,
-                "messages": api_messages,
-                "max_tokens": 8192,
-            }
-            # Reasoning models don't support temperature
-            if not is_reasoning:
-                kwargs["temperature"] = 0.3
-            
-            response = client.chat.completions.create(**kwargs)
-            elapsed = time.time() - start
-            
-            result = response.choices[0].message.content
-            cost = self._track_cost(model, response.usage.prompt_tokens, response.usage.completion_tokens)
-            
-            print(f"  [Cloud] {len(result)} chars in {elapsed:.1f}s "
-                  f"({response.usage.prompt_tokens} in / {response.usage.completion_tokens} out)", flush=True)
-            
-            return result
-        except Exception as e:
-            print(f"  [Cloud] OpenAI error: {e}", flush=True)
-            return None
+
+        for attempt in range(max_retries):
+            try:
+                start = time.time()
+
+                kwargs = {
+                    "model": model,
+                    "messages": api_messages,
+                    "max_tokens": 8192,
+                }
+                if not is_reasoning:
+                    kwargs["temperature"] = 0.3
+
+                response = client.chat.completions.create(**kwargs)
+                elapsed = time.time() - start
+
+                result = response.choices[0].message.content
+                cost = self._track_cost(model, response.usage.prompt_tokens, response.usage.completion_tokens)
+
+                print(f"  [Cloud] {len(result)} chars in {elapsed:.1f}s "
+                      f"({response.usage.prompt_tokens} in / {response.usage.completion_tokens} out)", flush=True)
+
+                return result
+            except Exception as e:
+                wait = 2 ** attempt
+                logger.warning("OpenAI attempt %d/%d failed: %s", attempt + 1, max_retries, e)
+                print(f"  [Cloud] OpenAI error (attempt {attempt + 1}/{max_retries}): {e}", flush=True)
+                if attempt < max_retries - 1:
+                    print(f"  [Cloud] Retrying in {wait}s...", flush=True)
+                    time.sleep(wait)
+
+        logger.error("OpenAI query failed after %d attempts", max_retries)
+        return None
     
     # ── Model Info for Dashboard ────────────────────────────────────────
     
@@ -554,17 +611,22 @@ class CloudReasoner:
     def get_status(self) -> str:
         if not self.enabled:
             return "Cloud reasoning: DISABLED"
-        
-        remaining = max(0, self.max_budget - self.monthly_spend)
+
         has_a = "✓" if self.anthropic_client else "✗"
         has_o = "✓" if self.openai_client else "✗"
-        
+        bal_a = self.provider_balances.get("anthropic", 0)
+        bal_o = self.provider_balances.get("openai", 0)
+        spent_a = self.provider_spend.get("anthropic", 0)
+        spent_o = self.provider_spend.get("openai", 0)
+
         return (
             f"Cloud reasoning: ENABLED\n"
             f"  Anthropic: {has_a} | Default: {self.default_anthropic}\n"
+            f"    Balance: ${bal_a:.2f} remaining (${spent_a:.2f} spent)\n"
             f"  OpenAI:    {has_o} | Default: {self.default_openai}\n"
+            f"    Balance: ${bal_o:.2f} remaining (${spent_o:.2f} spent)\n"
             f"  Auto-route: {'ON' if self.auto_route else 'OFF'}\n"
-            f"  Monthly: ${self.monthly_spend:.2f} / ${self.max_budget:.2f} (${remaining:.2f} left)\n"
+            f"  Total spent this month: ${self.monthly_spend:.2f}\n"
             f"  Models available: {sum(1 for m in MODELS if MODELS[m]['provider'] == 'anthropic')} Anthropic, "
             f"{sum(1 for m in MODELS if MODELS[m]['provider'] == 'openai')} OpenAI"
         )

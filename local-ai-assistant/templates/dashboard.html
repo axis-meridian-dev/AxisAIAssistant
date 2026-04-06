@@ -1,0 +1,1101 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Local AI Assistant</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+:root {
+    --bg-primary: #0a0a0f;
+    --bg-secondary: #12121a;
+    --bg-tertiary: #1a1a2e;
+    --bg-hover: #222238;
+    --border: #2a2a40;
+    --text-primary: #e8e8f0;
+    --text-secondary: #8888a8;
+    --text-dim: #555570;
+    --accent: #4a9eff;
+    --accent-glow: rgba(74, 158, 255, 0.15);
+    --green: #34d399;
+    --green-glow: rgba(52, 211, 153, 0.15);
+    --red: #f87171;
+    --yellow: #fbbf24;
+    --orange: #fb923c;
+    --purple: #a78bfa;
+    --radius: 8px;
+    --font-mono: 'JetBrains Mono', monospace;
+    --font-sans: 'Inter', -apple-system, sans-serif;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: var(--font-sans);
+    background: var(--bg-primary);
+    color: var(--text-primary);
+    height: 100vh;
+    display: flex;
+    overflow: hidden;
+}
+
+/* ── Sidebar ────────────────────────────────────────────── */
+.sidebar {
+    width: 280px;
+    min-width: 280px;
+    background: var(--bg-secondary);
+    border-right: 1px solid var(--border);
+    display: flex;
+    flex-direction: column;
+    height: 100vh;
+}
+
+.sidebar-header {
+    padding: 16px 20px;
+    border-bottom: 1px solid var(--border);
+}
+
+.sidebar-header h1 {
+    font-size: 16px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.sidebar-header h1 .dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--green);
+    box-shadow: 0 0 8px var(--green);
+    animation: pulse 2s infinite;
+}
+
+@keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.5; } }
+
+.sidebar-header .subtitle {
+    font-size: 11px;
+    color: var(--text-dim);
+    margin-top: 4px;
+    font-family: var(--font-mono);
+}
+
+/* New chat button */
+.new-chat-btn {
+    margin: 12px 12px 4px;
+    padding: 10px 16px;
+    background: var(--accent);
+    color: #fff;
+    border: none;
+    border-radius: var(--radius);
+    font-size: 13px;
+    font-weight: 600;
+    cursor: pointer;
+    transition: background 0.15s;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+}
+.new-chat-btn:hover { background: #3a8eef; }
+
+/* Session list */
+.session-list {
+    flex: 1;
+    overflow-y: auto;
+    padding: 4px 8px;
+}
+
+.session-item {
+    padding: 10px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 12px;
+    margin-bottom: 2px;
+    transition: background 0.15s;
+    position: relative;
+}
+.session-item:hover { background: var(--bg-hover); }
+.session-item.active { background: var(--accent-glow); border: 1px solid rgba(74,158,255,0.2); }
+.session-item .session-title {
+    font-weight: 500;
+    color: var(--text-primary);
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    margin-bottom: 2px;
+}
+.session-item .session-meta {
+    font-size: 10px;
+    color: var(--text-dim);
+    font-family: var(--font-mono);
+}
+.session-item .session-actions {
+    display: none;
+    position: absolute;
+    right: 8px;
+    top: 8px;
+    gap: 4px;
+}
+.session-item:hover .session-actions { display: flex; }
+.session-action-btn {
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-secondary);
+    font-size: 10px;
+    padding: 2px 6px;
+    cursor: pointer;
+}
+.session-action-btn:hover { background: var(--bg-hover); color: var(--text-primary); }
+.session-action-btn.delete:hover { color: var(--red); }
+
+/* Nav section */
+.nav-section-label {
+    font-size: 10px;
+    font-weight: 600;
+    color: var(--text-dim);
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    padding: 12px 12px 4px;
+}
+
+.nav { padding: 4px 8px; }
+
+.nav-item {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 9px 12px;
+    border-radius: var(--radius);
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 500;
+    color: var(--text-secondary);
+    transition: all 0.15s;
+    margin-bottom: 2px;
+}
+.nav-item:hover { background: var(--bg-hover); color: var(--text-primary); }
+.nav-item.active { background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(74,158,255,0.2); }
+.nav-item .icon { font-size: 16px; width: 20px; text-align: center; }
+
+/* Balance bar in sidebar */
+.balance-bar {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    font-family: var(--font-mono);
+}
+.balance-row {
+    display: flex;
+    justify-content: space-between;
+    margin-bottom: 4px;
+    color: var(--text-dim);
+}
+.balance-row .balance-amount { color: var(--green); font-weight: 600; }
+.balance-row .balance-amount.low { color: var(--yellow); }
+.balance-row .balance-amount.empty { color: var(--red); }
+
+/* System stats in sidebar */
+.sys-stats {
+    padding: 12px 16px;
+    border-top: 1px solid var(--border);
+    font-size: 11px;
+    font-family: var(--font-mono);
+    color: var(--text-dim);
+}
+.sys-stat { display: flex; justify-content: space-between; margin-bottom: 4px; }
+.stat-bar { height: 3px; background: var(--bg-tertiary); border-radius: 2px; margin-top: 2px; margin-bottom: 6px; overflow: hidden; }
+.stat-fill { height: 100%; border-radius: 2px; transition: width 1s; }
+.stat-fill.good { background: var(--green); }
+.stat-fill.warn { background: var(--yellow); }
+.stat-fill.danger { background: var(--red); }
+
+/* ── Main content ───────────────────────────────────────── */
+.main { flex: 1; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+.page { display: none; flex-direction: column; height: 100%; overflow: hidden; }
+.page.active { display: flex; }
+
+/* ── Chat page ──────────────────────────────────────────── */
+.chat-header {
+    padding: 12px 24px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--bg-secondary);
+    gap: 12px;
+}
+
+.chat-header-left { display: flex; align-items: center; gap: 12px; }
+.chat-header-right { display: flex; align-items: center; gap: 8px; }
+
+.model-selector {
+    font-family: var(--font-mono);
+    font-size: 11px;
+    padding: 6px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 6px;
+    color: var(--accent);
+    cursor: pointer;
+    outline: none;
+    max-width: 260px;
+}
+.model-selector:focus { border-color: var(--accent); }
+.model-selector option { background: var(--bg-secondary); color: var(--text-primary); }
+.model-selector optgroup { color: var(--text-secondary); }
+
+.mode-selector {
+    font-size: 11px;
+    padding: 5px 8px;
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: 4px;
+    color: var(--text-primary);
+    cursor: pointer;
+    outline: none;
+}
+
+.balance-badge {
+    font-family: var(--font-mono);
+    font-size: 10px;
+    padding: 4px 10px;
+    background: var(--bg-tertiary);
+    border: 1px solid var(--border);
+    border-radius: 20px;
+    color: var(--green);
+    white-space: nowrap;
+}
+
+.chat-messages { flex: 1; overflow-y: auto; padding: 24px; scroll-behavior: smooth; }
+
+.message { max-width: 800px; margin: 0 auto 20px; display: flex; gap: 12px; }
+.message .avatar {
+    width: 32px; height: 32px; border-radius: 6px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 14px; flex-shrink: 0;
+}
+.message.user .avatar { background: var(--accent-glow); border: 1px solid rgba(74,158,255,0.3); }
+.message.assistant .avatar { background: var(--green-glow); border: 1px solid rgba(52,211,153,0.3); }
+.message .content { flex: 1; font-size: 14px; line-height: 1.7; color: var(--text-primary); }
+.message .content pre {
+    background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 12px 16px; overflow-x: auto; font-family: var(--font-mono); font-size: 12px; margin: 8px 0;
+}
+.message .content code { font-family: var(--font-mono); font-size: 12px; background: var(--bg-tertiary); padding: 2px 6px; border-radius: 4px; }
+.message .meta { font-size: 11px; color: var(--text-dim); margin-top: 4px; font-family: var(--font-mono); }
+.message .meta .cost-tag { color: var(--yellow); margin-left: 8px; }
+.message .meta .response-time { margin-left: 8px; color: var(--accent); }
+
+.chat-input-area { padding: 16px 24px 24px; border-top: 1px solid var(--border); background: var(--bg-secondary); }
+.chat-input-wrapper { max-width: 800px; margin: 0 auto; display: flex; gap: 8px; }
+.chat-input {
+    flex: 1; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius);
+    padding: 12px 16px; color: var(--text-primary); font-family: var(--font-sans); font-size: 14px; outline: none;
+    transition: border-color 0.2s;
+}
+.chat-input:focus { border-color: var(--accent); }
+.chat-input::placeholder { color: var(--text-dim); }
+.chat-input:disabled { opacity: 0.5; }
+
+.processing-indicator { display: none; align-items: center; gap: 8px; color: var(--accent); font-size: 13px; padding: 8px 0; max-width: 800px; margin: 0 auto; }
+.processing-indicator.active { display: flex; }
+.spinner { width: 16px; height: 16px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; }
+@keyframes spin { to { transform: rotate(360deg); } }
+
+/* ── Buttons ───────────────────────────────────────────── */
+.btn {
+    padding: 10px 20px; border-radius: var(--radius); border: 1px solid var(--border);
+    background: var(--bg-tertiary); color: var(--text-primary); font-size: 13px; font-weight: 600;
+    cursor: pointer; transition: all 0.15s; font-family: var(--font-sans);
+}
+.btn:hover { background: var(--bg-hover); }
+.btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+.btn-primary:hover { background: #3a8eef; }
+.btn-danger { border-color: var(--red); color: var(--red); }
+.btn-danger:hover { background: rgba(248,113,113,0.1); }
+.btn-sm { padding: 6px 12px; font-size: 12px; }
+
+/* ── Generic page layout ───────────────────────────────── */
+.page-header { padding: 24px; border-bottom: 1px solid var(--border); background: var(--bg-secondary); }
+.page-header h2 { font-size: 20px; font-weight: 700; }
+.page-header p { font-size: 13px; color: var(--text-secondary); margin-top: 4px; }
+.page-content { flex: 1; overflow-y: auto; padding: 24px; }
+
+.card { background: var(--bg-secondary); border: 1px solid var(--border); border-radius: var(--radius); padding: 20px; margin-bottom: 16px; }
+.card h3 { font-size: 14px; font-weight: 600; margin-bottom: 16px; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; }
+
+.model-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 16px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; transition: background 0.15s; }
+.model-row:hover { background: var(--bg-hover); }
+.model-info { display: flex; align-items: center; gap: 12px; }
+.model-name { font-family: var(--font-mono); font-size: 13px; font-weight: 600; }
+.model-size { font-size: 11px; color: var(--text-dim); font-family: var(--font-mono); }
+.model-desc { font-size: 12px; color: var(--text-secondary); }
+.model-badges { display: flex; gap: 6px; }
+.badge { font-size: 10px; font-weight: 600; padding: 2px 8px; border-radius: 10px; text-transform: uppercase; letter-spacing: 0.5px; }
+.badge-primary { background: var(--accent-glow); color: var(--accent); border: 1px solid rgba(74,158,255,0.3); }
+.badge-fast { background: var(--green-glow); color: var(--green); border: 1px solid rgba(52,211,153,0.3); }
+.badge-light { background: rgba(251,191,36,0.1); color: var(--yellow); border: 1px solid rgba(251,191,36,0.2); }
+.badge-medium { background: rgba(251,146,60,0.1); color: var(--orange); border: 1px solid rgba(251,146,60,0.2); }
+.badge-heavy { background: rgba(248,113,113,0.1); color: var(--red); border: 1px solid rgba(248,113,113,0.2); }
+.badge-extreme { background: rgba(167,139,250,0.1); color: var(--purple); border: 1px solid rgba(167,139,250,0.2); }
+.model-actions { display: flex; gap: 6px; }
+.pull-progress { font-family: var(--font-mono); font-size: 12px; color: var(--accent); padding: 8px 0; display: none; }
+
+.tool-row { display: flex; align-items: center; justify-content: space-between; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); margin-bottom: 8px; }
+.tool-info { flex: 1; }
+.tool-name { font-weight: 600; font-size: 14px; margin-bottom: 2px; }
+.tool-functions { font-size: 12px; color: var(--text-dim); font-family: var(--font-mono); }
+
+.toggle { position: relative; width: 44px; height: 24px; cursor: pointer; }
+.toggle input { display: none; }
+.toggle-slider { position: absolute; inset: 0; background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: 12px; transition: all 0.2s; }
+.toggle-slider::before { content: ""; position: absolute; width: 18px; height: 18px; border-radius: 50%; background: var(--text-dim); top: 2px; left: 2px; transition: all 0.2s; }
+.toggle input:checked + .toggle-slider { background: var(--accent-glow); border-color: var(--accent); }
+.toggle input:checked + .toggle-slider::before { background: var(--accent); transform: translateX(20px); }
+
+.setting-row { display: flex; align-items: center; justify-content: space-between; padding: 12px 0; border-bottom: 1px solid var(--border); }
+.setting-label { font-size: 13px; font-weight: 500; }
+.setting-desc { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.setting-input { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; color: var(--text-primary); font-family: var(--font-mono); font-size: 13px; outline: none; width: 200px; text-align: right; }
+.setting-input:focus { border-color: var(--accent); }
+
+/* ── Toast notifications ──────────────────────────────── */
+.toast {
+    position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+    padding: 12px 20px; border-radius: var(--radius); font-size: 13px;
+    color: #fff; opacity: 0; transform: translateY(10px);
+    transition: opacity 0.3s, transform 0.3s; pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.success { background: #16a34a; }
+.toast.error { background: #dc2626; }
+.toast.warn { background: #d97706; }
+
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+
+@media (max-width: 768px) {
+    .sidebar { width: 60px; min-width: 60px; }
+    .sidebar-header h1 span, .sidebar-header .subtitle, .nav-item span:not(.icon), .nav-section-label,
+    .sys-stats, .balance-bar, .session-list, .new-chat-btn span { display: none; }
+    .nav-item { justify-content: center; padding: 12px; }
+    .new-chat-btn { justify-content: center; padding: 10px; }
+}
+</style>
+</head>
+<body>
+
+<!-- Sidebar -->
+<div class="sidebar">
+    <div class="sidebar-header">
+        <h1><span class="dot"></span> <span>AI Assistant</span></h1>
+        <div class="subtitle">fully local · fully yours</div>
+    </div>
+
+    <button class="new-chat-btn" onclick="newSession()">+ <span>New Chat</span></button>
+
+    <div class="nav-section-label">Conversations</div>
+    <div class="session-list" id="session-list"></div>
+
+    <div class="nav-section-label">Pages</div>
+    <nav class="nav">
+        <div class="nav-item" data-page="models"><span class="icon">&#129504;</span> <span>Models</span></div>
+        <div class="nav-item" data-page="tools"><span class="icon">&#128295;</span> <span>Tools</span></div>
+        <div class="nav-item" data-page="settings"><span class="icon">&#9881;&#65039;</span> <span>Settings</span></div>
+        <div class="nav-item" data-page="knowledge"><span class="icon">&#128218;</span> <span>Knowledge Base</span></div>
+        <div class="nav-item" data-page="legal"><span class="icon">&#9878;&#65039;</span> <span>Legal Research</span></div>
+    </nav>
+
+    <div class="balance-bar" id="balance-bar">
+        <div class="balance-row"><span>Anthropic</span><span class="balance-amount" id="bal-anthropic">$--.--</span></div>
+        <div class="balance-row"><span>OpenAI</span><span class="balance-amount" id="bal-openai">$--.--</span></div>
+    </div>
+
+    <div class="sys-stats" id="sys-stats">
+        <div class="sys-stat"><span>CPU</span><span id="cpu-pct">--</span></div>
+        <div class="stat-bar"><div class="stat-fill good" id="cpu-bar" style="width:0%"></div></div>
+        <div class="sys-stat"><span>RAM</span><span id="ram-pct">--</span></div>
+        <div class="stat-bar"><div class="stat-fill good" id="ram-bar" style="width:0%"></div></div>
+        <div class="sys-stat"><span>GPU</span><span id="gpu-pct">--</span></div>
+        <div class="stat-bar"><div class="stat-fill good" id="gpu-bar" style="width:0%"></div></div>
+    </div>
+</div>
+
+<!-- Main content -->
+<div class="main">
+
+    <!-- Chat Page (always visible by default) -->
+    <div class="page active" id="page-chat">
+        <div class="chat-header">
+            <div class="chat-header-left">
+                <span style="font-weight:600;">Chat</span>
+                <select class="mode-selector" id="mode-selector" onchange="setMode(this.value)">
+                    <option value="general">General</option>
+                    <option value="research">Research</option>
+                    <option value="analysis">Analysis</option>
+                    <option value="argument">Argument</option>
+                    <option value="write">Write</option>
+                </select>
+            </div>
+            <div class="chat-header-right">
+                <select class="model-selector" id="cloud-model-selector" onchange="setCloudModel(this.value)">
+                    <option value="auto">Auto (smart routing)</option>
+                </select>
+                <span class="balance-badge" id="header-balance">--</span>
+            </div>
+        </div>
+        <div class="chat-messages" id="chat-messages">
+            <div class="message assistant">
+                <div class="avatar">&#129302;</div>
+                <div class="content">Ready. Type a message to begin.</div>
+            </div>
+        </div>
+        <div class="chat-input-area">
+            <div class="processing-indicator" id="processing">
+                <div class="spinner"></div>
+                <span id="processing-text">Processing...</span>
+            </div>
+            <div class="chat-input-wrapper">
+                <input type="text" class="chat-input" id="chat-input"
+                       placeholder="Type a message..."
+                       onkeydown="if(event.key==='Enter')sendMessage()">
+                <button class="btn btn-primary" onclick="sendMessage()">Send</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Models Page -->
+    <div class="page" id="page-models">
+        <div class="page-header">
+            <h2>Model Manager</h2>
+            <p>Download, select, and manage LLM models via Ollama</p>
+        </div>
+        <div class="page-content">
+            <div class="card"><h3>Installed Models</h3><div id="installed-models">Loading...</div></div>
+            <div class="card"><h3>Available to Download</h3><div id="available-models">Loading...</div></div>
+            <div id="pull-progress" class="pull-progress"></div>
+        </div>
+    </div>
+
+    <!-- Tools Page -->
+    <div class="page" id="page-tools">
+        <div class="page-header"><h2>Tool Modules</h2><p>Enable or disable tool categories</p></div>
+        <div class="page-content"><div id="tools-list">Loading...</div></div>
+    </div>
+
+    <!-- Settings Page -->
+    <div class="page" id="page-settings">
+        <div class="page-header"><h2>Settings</h2><p>Configure model parameters, search, cloud, and behavior</p></div>
+        <div class="page-content">
+            <div class="card">
+                <h3>LLM Settings</h3>
+                <div class="setting-row">
+                    <div><div class="setting-label">Primary Model</div><div class="setting-desc">Local Ollama model for tool routing</div></div>
+                    <select class="setting-input" id="setting-primary-model" onchange="saveSettings()"></select>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">Temperature</div><div class="setting-desc">0.0 - 1.0</div></div>
+                    <input type="number" class="setting-input" id="setting-temp" min="0" max="1" step="0.1" value="0.3" onchange="saveSettings()">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">Context Window</div><div class="setting-desc">Token limit (4096 - 32768)</div></div>
+                    <input type="number" class="setting-input" id="setting-ctx" min="4096" max="32768" step="1024" value="8192" onchange="saveSettings()">
+                </div>
+            </div>
+            <div class="card">
+                <h3>Cloud Reasoning</h3>
+                <div class="setting-row">
+                    <div><div class="setting-label">Cloud Enabled</div><div class="setting-desc">Route complex queries to cloud API</div></div>
+                    <label class="toggle"><input type="checkbox" id="setting-cloud-enabled" onchange="saveCloudSettings()"><div class="toggle-slider"></div></label>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">Auto-Route</div><div class="setting-desc">Automatically decide local vs cloud</div></div>
+                    <label class="toggle"><input type="checkbox" id="setting-cloud-autoroute" onchange="saveCloudSettings()"><div class="toggle-slider"></div></label>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">Default Provider</div></div>
+                    <select class="setting-input" id="setting-cloud-provider" onchange="saveCloudSettings()" style="width:160px">
+                        <option value="anthropic">Anthropic</option>
+                        <option value="openai">OpenAI</option>
+                    </select>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">Anthropic Balance</div><div class="setting-desc">Your account balance (editable)</div></div>
+                    <input type="number" class="setting-input" id="setting-bal-anthropic" min="0" step="5" value="40" onchange="saveBalances()" style="width:100px">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">OpenAI Balance</div><div class="setting-desc">Your account balance (editable)</div></div>
+                    <input type="number" class="setting-input" id="setting-bal-openai" min="0" step="5" value="20" onchange="saveBalances()" style="width:100px">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">API Key Status</div></div>
+                    <span id="cloud-key-status" style="font-family:var(--font-mono);font-size:12px">checking...</span>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Feature Toggles</h3>
+                <div class="setting-row">
+                    <div><div class="setting-label">Autonomous Collection</div></div>
+                    <label class="toggle"><input type="checkbox" id="toggle-autonomous-collection" onchange="saveFeatureToggles()"><div class="toggle-slider"></div></label>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">Auto Ingest Downloads</div></div>
+                    <label class="toggle"><input type="checkbox" id="toggle-auto-ingest" onchange="saveFeatureToggles()"><div class="toggle-slider"></div></label>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">Strict Legal Mode</div></div>
+                    <label class="toggle"><input type="checkbox" id="toggle-strict-legal" onchange="saveFeatureToggles()" checked><div class="toggle-slider"></div></label>
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">Allow External Downloads</div></div>
+                    <label class="toggle"><input type="checkbox" id="toggle-external-downloads" onchange="saveFeatureToggles()"><div class="toggle-slider"></div></label>
+                </div>
+            </div>
+            <div class="card">
+                <h3>Search</h3>
+                <div class="setting-row">
+                    <div><div class="setting-label">SearXNG URL</div></div>
+                    <input type="text" class="setting-input" id="setting-searxng" value="http://localhost:8888" onchange="saveSettings()">
+                </div>
+                <div class="setting-row">
+                    <div><div class="setting-label">Max Results</div></div>
+                    <input type="number" class="setting-input" id="setting-search-results" min="1" max="20" value="5" onchange="saveSettings()" style="width:80px">
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Knowledge Base Page -->
+    <div class="page" id="page-knowledge">
+        <div class="page-header"><h2>Knowledge Base</h2><p>Your local vector database</p></div>
+        <div class="page-content"><div class="card" id="kb-stats">Loading...</div></div>
+    </div>
+
+    <!-- Legal Research Page -->
+    <div class="page" id="page-legal">
+        <div class="page-header"><h2>Legal Research Library</h2><p>Downloaded statutes, case law, and news</p></div>
+        <div class="page-content"><div id="legal-files">Loading...</div></div>
+    </div>
+
+</div>
+<div class="toast" id="toast"></div>
+
+<script>
+// ── CSRF + Fetch Wrapper ─────────────────────────────────
+function getCsrf() {
+    const m = document.cookie.match(/csrf_token=([^;]+)/);
+    return m ? m[1] : '';
+}
+
+function api(url, opts = {}) {
+    opts.headers = Object.assign({'Content-Type': 'application/json', 'X-CSRF-Token': getCsrf()}, opts.headers || {});
+    return fetch(url, opts);
+}
+
+// ── Toast ─────────────────────────────────────────────────
+function showToast(msg, type = 'success') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast ' + type + ' show';
+    clearTimeout(t._tid);
+    t._tid = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
+// ── State ─────────────────────────────────────────────────
+let currentSessionId = null;
+
+// ── Navigation ────────────────────────────────────────────
+document.querySelectorAll('.nav-item').forEach(item => {
+    item.addEventListener('click', () => {
+        // Deactivate nav items, show chat is no longer the active page-nav
+        document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+        document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+        item.classList.add('active');
+        document.getElementById('page-' + item.dataset.page).classList.add('active');
+        // Deactivate session items too
+        document.querySelectorAll('.session-item').forEach(s => s.classList.remove('active'));
+
+        const page = item.dataset.page;
+        if (page === 'models') loadModels();
+        if (page === 'tools') loadTools();
+        if (page === 'settings') loadSettings();
+        if (page === 'knowledge') loadKnowledgeStats();
+        if (page === 'legal') loadLegalFiles();
+    });
+});
+
+function showChatPage() {
+    document.querySelectorAll('.nav-item').forEach(n => n.classList.remove('active'));
+    document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
+    document.getElementById('page-chat').classList.add('active');
+}
+
+// ── Sessions ──────────────────────────────────────────────
+async function loadSessions() {
+    try {
+        const data = await api('/api/sessions').then(r => r.json());
+        currentSessionId = data.current_session;
+        const container = document.getElementById('session-list');
+        if (!data.sessions || data.sessions.length === 0) {
+            container.innerHTML = '<div style="padding:12px;color:var(--text-dim);font-size:11px;">No conversations yet</div>';
+            return;
+        }
+        container.innerHTML = data.sessions.map(s => {
+            const isActive = s.session_id === currentSessionId;
+            const date = new Date(s.started_at);
+            const dateStr = date.toLocaleDateString(undefined, {month:'short', day:'numeric'});
+            const title = s.title || 'Untitled';
+            const displayTitle = title.length > 40 ? title.substring(0, 37) + '...' : title;
+            return `
+                <div class="session-item ${isActive ? 'active' : ''}" onclick="loadSession('${s.session_id}')">
+                    <div class="session-title">${escapeHtml(displayTitle)}</div>
+                    <div class="session-meta">${dateStr} · ${s.messages} msgs</div>
+                    <div class="session-actions">
+                        <button class="session-action-btn" onclick="event.stopPropagation();exportSession('${s.session_id}')" title="Export">&#8615;</button>
+                        <button class="session-action-btn delete" onclick="event.stopPropagation();deleteSession('${s.session_id}')" title="Delete">&#x2715;</button>
+                    </div>
+                </div>`;
+        }).join('');
+    } catch(e) {
+        console.error('Failed to load sessions:', e);
+    }
+}
+
+async function newSession() {
+    try {
+        const data = await api('/api/sessions/new', {method:'POST'}).then(r=>r.json());
+        currentSessionId = data.session_id;
+        document.getElementById('chat-messages').innerHTML = `
+            <div class="message assistant"><div class="avatar">&#129302;</div>
+            <div class="content">New conversation started. How can I help?</div></div>`;
+        showChatPage();
+        loadSessions();
+    } catch(e) { console.error(e); }
+}
+
+async function loadSession(sessionId) {
+    try {
+        const data = await api(`/api/sessions/${sessionId}/load`, {method:'POST'}).then(r=>r.json());
+        if (data.error) return;
+        currentSessionId = data.session_id;
+        const container = document.getElementById('chat-messages');
+        container.innerHTML = '';
+        for (const m of data.messages) {
+            if (m.role === 'user' || m.role === 'assistant') {
+                addMessage(m.role, m.content);
+            }
+        }
+        showChatPage();
+        loadSessions();
+    } catch(e) { console.error(e); }
+}
+
+async function deleteSession(sessionId) {
+    if (!confirm('Delete this conversation?')) return;
+    await api(`/api/sessions/${sessionId}`, {method:'DELETE'});
+    if (sessionId === currentSessionId) await newSession();
+    else loadSessions();
+}
+
+function exportSession(sessionId) {
+    window.open(`/api/sessions/${sessionId}/export`, '_blank');
+}
+
+// ── Chat ──────────────────────────────────────────────────
+async function sendMessage() {
+    const input = document.getElementById('chat-input');
+    const msg = input.value.trim();
+    if (!msg) return;
+
+    input.value = '';
+    input.disabled = true;
+    addMessage('user', msg);
+
+    const proc = document.getElementById('processing');
+    proc.classList.add('active');
+    document.getElementById('processing-text').textContent = 'Processing...';
+
+    try {
+        const cloudModel = document.getElementById('cloud-model-selector').value;
+        const body = {message: msg};
+        if (cloudModel !== 'auto') body.cloud_model = cloudModel;
+
+        const res = await api('/api/chat', {
+            method: 'POST',
+            body: JSON.stringify(body)
+        });
+        if (res.status === 429) {
+            addMessage('assistant', 'Rate limit reached. Please wait a moment before sending another message.');
+            proc.classList.remove('active'); input.disabled = false; input.focus(); return;
+        }
+        const data = await res.json();
+
+        let meta = data.model || '';
+        if (data.cloud_model) meta = data.cloud_model;
+        if (data.response_time) meta += ` · ${data.response_time}s`;
+
+        addMessage('assistant', data.response || data.error, meta, data.response_time);
+
+        if (data.balances) updateBalanceDisplay(data.balances);
+        if (data.history_truncated) showToast('Older messages trimmed to keep context manageable', 'warn');
+        loadSessions();
+    } catch(e) {
+        addMessage('assistant', 'Error: Could not reach the server.');
+    }
+
+    proc.classList.remove('active');
+    input.disabled = false;
+    input.focus();
+}
+
+function addMessage(role, content, metaText, responseTime) {
+    const container = document.getElementById('chat-messages');
+    const div = document.createElement('div');
+    div.className = `message ${role}`;
+
+    const avatar = role === 'user' ? '&#128100;' : '&#129302;';
+    const escaped = escapeHtml(content)
+        .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
+        .replace(/`([^`]+)`/g, '<code>$1</code>')
+        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+        .replace(/\n/g, '<br>');
+
+    let meta = '';
+    if (metaText) meta = `<div class="meta">${metaText}</div>`;
+
+    div.innerHTML = `<div class="avatar">${avatar}</div><div class="content">${escaped}${meta}</div>`;
+    container.appendChild(div);
+    container.scrollTop = container.scrollHeight;
+}
+
+function escapeHtml(s) {
+    return (s || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+}
+
+// ── Cloud Model Selector ──────────────────────────────────
+async function loadCloudModels() {
+    try {
+        const data = await api('/api/cloud/models').then(r=>r.json());
+        const sel = document.getElementById('cloud-model-selector');
+        let html = '<option value="auto">Auto (smart routing)</option>';
+
+        const providers = {};
+        for (const m of data.models) {
+            if (!providers[m.provider]) providers[m.provider] = [];
+            providers[m.provider].push(m);
+        }
+
+        for (const [provider, models] of Object.entries(providers)) {
+            html += `<optgroup label="${provider.charAt(0).toUpperCase() + provider.slice(1)}">`;
+            for (const m of models) {
+                const tag = m.affordable ? '' : ' [no funds]';
+                const isDefault = (m.id === data.default_anthropic || m.id === data.default_openai) ? ' (default)' : '';
+                html += `<option value="${m.id}" ${!m.affordable ? 'disabled' : ''}>${m.name} — $${m.input_price}/$${m.output_price}/M${isDefault}${tag}</option>`;
+            }
+            html += '</optgroup>';
+        }
+
+        sel.innerHTML = html;
+        if (data.active_model) sel.value = data.active_model;
+    } catch(e) { console.error('Failed to load cloud models:', e); }
+}
+
+async function setCloudModel(modelId) {
+    await api('/api/cloud/model', {
+        method: 'POST',
+        body: JSON.stringify({model: modelId})
+    });
+}
+
+// ── Balances ──────────────────────────────────────────────
+async function loadBalances() {
+    try {
+        const data = await api('/api/cloud/balances').then(r=>r.json());
+        updateBalanceDisplay(data.balances);
+    } catch(e) {}
+}
+
+function updateBalanceDisplay(balances) {
+    if (!balances) return;
+    const fmt = (v) => '$' + (v || 0).toFixed(2);
+    const cls = (v) => v < 1 ? 'empty' : v < 5 ? 'low' : '';
+
+    document.getElementById('bal-anthropic').textContent = fmt(balances.anthropic);
+    document.getElementById('bal-anthropic').className = 'balance-amount ' + cls(balances.anthropic);
+    document.getElementById('bal-openai').textContent = fmt(balances.openai);
+    document.getElementById('bal-openai').className = 'balance-amount ' + cls(balances.openai);
+
+    // Header badge
+    document.getElementById('header-balance').textContent =
+        `A: ${fmt(balances.anthropic)} · O: ${fmt(balances.openai)}`;
+}
+
+async function saveBalances() {
+    const a = Math.max(0, parseFloat(document.getElementById('setting-bal-anthropic').value) || 0);
+    const o = Math.max(0, parseFloat(document.getElementById('setting-bal-openai').value) || 0);
+    document.getElementById('setting-bal-anthropic').value = a.toFixed(2);
+    document.getElementById('setting-bal-openai').value = o.toFixed(2);
+    const data = await api('/api/cloud/balances', {
+        method: 'POST',
+        body: JSON.stringify({anthropic: a, openai: o})
+    }).then(r=>r.json());
+    if (data.balances) updateBalanceDisplay(data.balances);
+    showToast('Balances updated');
+}
+
+// ── Mode ──────────────────────────────────────────────────
+async function setMode(mode) {
+    try { await api('/api/mode', {method:'POST', body:JSON.stringify({mode})}); } catch(e) {}
+}
+
+// ── Models page ───────────────────────────────────────────
+async function loadModels() {
+    const [installed, available] = await Promise.all([
+        api('/api/models').then(r=>r.json()),
+        api('/api/models/available').then(r=>r.json())
+    ]);
+
+    const container = document.getElementById('installed-models');
+    if (!installed.models || installed.models.length === 0) {
+        container.innerHTML = '<div style="color:var(--text-dim);font-size:13px;">No models installed</div>';
+    } else {
+        container.innerHTML = installed.models.map(m => `
+            <div class="model-row">
+                <div class="model-info"><div>
+                    <div class="model-name">${m.name}</div>
+                    <div class="model-size">${m.size}</div>
+                </div><div class="model-badges">
+                    ${m.is_primary ? '<span class="badge badge-primary">Primary</span>' : ''}
+                    ${m.is_fast ? '<span class="badge badge-fast">Fast</span>' : ''}
+                </div></div>
+                <div class="model-actions">
+                    <button class="btn btn-sm" onclick="setModel('primary','${m.name}')">Set Primary</button>
+                    <button class="btn btn-sm btn-danger" onclick="deleteModel('${m.name}')">Delete</button>
+                </div>
+            </div>
+        `).join('');
+    }
+
+    const avail = document.getElementById('available-models');
+    const installedNames = (installed.models || []).map(m => m.name);
+    avail.innerHTML = available.models.map(m => {
+        const isInstalled = installedNames.some(n => n.startsWith(m.name.split(':')[0]));
+        return `
+            <div class="model-row">
+                <div class="model-info"><div>
+                    <div class="model-name">${m.name}</div>
+                    <div class="model-desc">${m.desc} · ${m.size} · needs ${m.vram} VRAM</div>
+                </div><span class="badge badge-${m.tier}">${m.tier}</span></div>
+                <div class="model-actions">
+                    ${isInstalled
+                        ? '<span style="color:var(--green);font-size:12px;">&#10003; installed</span>'
+                        : `<button class="btn btn-sm btn-primary" onclick="pullModel('${m.name}')">Download</button>`
+                    }
+                </div>
+            </div>`;
+    }).join('');
+
+    updateModelSelects(installed.models || []);
+}
+
+async function pullModel(name) {
+    const progress = document.getElementById('pull-progress');
+    progress.style.display = 'block';
+    progress.textContent = `Downloading ${name}...`;
+    const res = await api('/api/models/pull', {method:'POST', body:JSON.stringify({model:name})});
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    while(true) {
+        const {done, value} = await reader.read();
+        if (done) break;
+        const lines = decoder.decode(value).split('\n').filter(l => l.startsWith('data: '));
+        for (const line of lines) {
+            try {
+                const data = JSON.parse(line.slice(6));
+                if (data.line) progress.textContent = data.line;
+                if (data.done) { progress.textContent = data.success ? `Done: ${name}` : 'Failed'; setTimeout(() => { progress.style.display='none'; loadModels(); }, 2000); }
+            } catch(e) {}
+        }
+    }
+}
+
+async function deleteModel(name) {
+    if (!confirm(`Delete ${name}?`)) return;
+    await api('/api/models/delete', {method:'POST', body:JSON.stringify({model:name})});
+    loadModels();
+}
+
+async function setModel(role, name) {
+    await api('/api/config', {method:'POST', body:JSON.stringify({llm:{[role+'_model']:name}})});
+    loadModels();
+}
+
+function updateModelSelects(models) {
+    const sel = document.getElementById('setting-primary-model');
+    if (sel) {
+        const cur = sel.value;
+        sel.innerHTML = models.map(m => `<option value="${m.name}" ${m.name===cur?'selected':''}>${m.name}</option>`).join('');
+    }
+}
+
+// ── Tools ─────────────────────────────────────────────────
+async function loadTools() {
+    const tools = await api('/api/tools').then(r=>r.json());
+    const descs = {
+        file_manager:'Read, write, search, organize files', web_search:'Search internet, fetch pages',
+        desktop_control:'Launch apps, windows, clipboard, commands', system_info:'CPU, RAM, GPU stats',
+        knowledge_base:'Vector DB semantic search', legal_research:'Statutes, case law, news',
+        document_writer:'Generate essays, briefs, documents',
+    };
+    document.getElementById('tools-list').innerHTML = Object.entries(tools).map(([name, info]) => `
+        <div class="tool-row">
+            <div class="tool-info"><div class="tool-name">${name.replace(/_/g,' ')}</div>
+            <div class="tool-functions">${info.function_count} functions · ${descs[name]||''}</div></div>
+            <label class="toggle"><input type="checkbox" ${info.enabled?'checked':''} onchange="toggleTool('${name}',this.checked)"><div class="toggle-slider"></div></label>
+        </div>`).join('');
+}
+
+async function toggleTool(name, enabled) {
+    await api('/api/tools/toggle', {method:'POST', body:JSON.stringify({tool:name,enabled})});
+    showToast(enabled ? `${name} enabled` : `${name} disabled`);
+}
+
+// ── Settings ──────────────────────────────────────────────
+async function loadSettings() {
+    const cfg = await api('/api/config').then(r=>r.json());
+    document.getElementById('setting-temp').value = cfg.llm?.temperature ?? 0.3;
+    document.getElementById('setting-ctx').value = cfg.llm?.context_window ?? 8192;
+    document.getElementById('setting-searxng').value = cfg.search?.searxng_url ?? '';
+    document.getElementById('setting-search-results').value = cfg.search?.max_results ?? 5;
+
+    const features = cfg.features || {};
+    document.getElementById('toggle-autonomous-collection').checked = features.autonomous_collection || false;
+    document.getElementById('toggle-auto-ingest').checked = features.auto_ingest || false;
+    document.getElementById('toggle-strict-legal').checked = features.strict_legal_mode !== false;
+    document.getElementById('toggle-external-downloads').checked = features.allow_external_downloads || false;
+
+    // Cloud
+    const cloud = cfg.cloud || {};
+    document.getElementById('setting-cloud-enabled').checked = cloud.enabled || false;
+    document.getElementById('setting-cloud-autoroute').checked = cloud.auto_route || false;
+    document.getElementById('setting-cloud-provider').value = cloud.provider || 'anthropic';
+
+    const hasA = cloud.anthropic_api_key && cloud.anthropic_api_key.length > 5;
+    const hasO = cloud.openai_api_key && cloud.openai_api_key.length > 5;
+    const keyEl = document.getElementById('cloud-key-status');
+    keyEl.innerHTML = `Anthropic: ${hasA?'<span style="color:var(--green)">set</span>':'<span style="color:var(--red)">missing</span>'} · OpenAI: ${hasO?'<span style="color:var(--green)">set</span>':'<span style="color:var(--red)">missing</span>'}`;
+
+    // Model selects
+    try {
+        const models = await api('/api/models').then(r=>r.json());
+        if (models.models) updateModelSelects(models.models);
+    } catch(e) {}
+
+    // Balances in settings
+    try {
+        const bal = await api('/api/cloud/balances').then(r=>r.json());
+        document.getElementById('setting-bal-anthropic').value = (bal.balances?.anthropic || 0).toFixed(2);
+        document.getElementById('setting-bal-openai').value = (bal.balances?.openai || 0).toFixed(2);
+    } catch(e) {}
+}
+
+async function saveSettings() {
+    const cfg = {
+        llm: { primary_model: document.getElementById('setting-primary-model').value, temperature: parseFloat(document.getElementById('setting-temp').value), context_window: parseInt(document.getElementById('setting-ctx').value) },
+        search: { searxng_url: document.getElementById('setting-searxng').value, max_results: parseInt(document.getElementById('setting-search-results').value) }
+    };
+    const res = await api('/api/config', {method:'POST', body:JSON.stringify(cfg)});
+    showToast(res.ok ? 'Settings saved' : 'Failed to save', res.ok ? 'success' : 'error');
+}
+
+async function saveCloudSettings() {
+    const cfg = {
+        cloud: {
+            enabled: document.getElementById('setting-cloud-enabled').checked,
+            auto_route: document.getElementById('setting-cloud-autoroute').checked,
+            provider: document.getElementById('setting-cloud-provider').value,
+        }
+    };
+    const res = await api('/api/config', {method:'POST', body:JSON.stringify(cfg)});
+    showToast(res.ok ? 'Cloud settings saved' : 'Failed to save', res.ok ? 'success' : 'error');
+}
+
+async function saveFeatureToggles() {
+    const features = {
+        autonomous_collection: document.getElementById('toggle-autonomous-collection').checked,
+        auto_ingest: document.getElementById('toggle-auto-ingest').checked,
+        strict_legal_mode: document.getElementById('toggle-strict-legal').checked,
+        allow_external_downloads: document.getElementById('toggle-external-downloads').checked,
+    };
+    const res = await api('/api/config', {method:'POST', body:JSON.stringify({features})});
+    showToast(res.ok ? 'Feature toggles saved' : 'Failed to save', res.ok ? 'success' : 'error');
+}
+
+// ── Knowledge Base ────────────────────────────────────────
+async function loadKnowledgeStats() {
+    try {
+        const stats = await api('/api/knowledge/stats').then(r=>r.json());
+        document.getElementById('kb-stats').innerHTML = `
+            <h3>Database Stats</h3>
+            <div class="setting-row"><div class="setting-label">Files Indexed</div><div style="font-family:var(--font-mono);color:var(--accent)">${stats.total_files}</div></div>
+            <div class="setting-row"><div class="setting-label">Total Chunks</div><div style="font-family:var(--font-mono);color:var(--accent)">${stats.total_chunks}</div></div>
+            <div class="setting-row"><div class="setting-label">Path</div><div style="font-family:var(--font-mono);font-size:11px;color:var(--text-dim)">${stats.db_path}</div></div>`;
+    } catch(e) { document.getElementById('kb-stats').innerHTML = '<div style="color:var(--text-dim)">Could not load stats</div>'; }
+}
+
+// ── Legal Files ───────────────────────────────────────────
+async function loadLegalFiles() {
+    try {
+        const data = await api('/api/legal/files').then(r=>r.json());
+        const container = document.getElementById('legal-files');
+        if (Object.keys(data.categories).length === 0) {
+            container.innerHTML = '<div class="card"><div style="color:var(--text-dim);text-align:center;padding:20px;">No files yet</div></div>';
+            return;
+        }
+        container.innerHTML = Object.entries(data.categories).map(([cat, files]) => `
+            <div class="card"><h3>${cat.replace(/_/g,' ')} (${files.length})</h3>
+            ${files.map(f => `<div style="display:flex;justify-content:space-between;padding:6px 0;border-bottom:1px solid var(--border);font-size:12px;"><span style="font-family:var(--font-mono)">${f.name}</span><span style="color:var(--text-dim)">${(f.size/1024).toFixed(0)}KB</span></div>`).join('')}
+            </div>`).join('');
+    } catch(e) { document.getElementById('legal-files').innerHTML = '<div style="color:var(--text-dim)">Could not load</div>'; }
+}
+
+// ── System Stats ──────────────────────────────────────────
+async function updateSystemStats() {
+    try {
+        const info = await api('/api/system').then(r=>r.json());
+        const setBar = (id, pct) => {
+            const bar = document.getElementById(id);
+            bar.style.width = pct + '%';
+            bar.className = `stat-fill ${pct < 60 ? 'good' : pct < 85 ? 'warn' : 'danger'}`;
+        };
+        document.getElementById('cpu-pct').textContent = info.cpu_percent + '%';
+        setBar('cpu-bar', info.cpu_percent);
+        document.getElementById('ram-pct').textContent = info.ram.percent + '%';
+        setBar('ram-bar', info.ram.percent);
+        if (info.gpu) {
+            const gpuPct = Math.round(info.gpu.vram_used_mb / info.gpu.vram_total_mb * 100);
+            document.getElementById('gpu-pct').textContent = `${info.gpu.vram_used_mb}/${info.gpu.vram_total_mb}MB`;
+            setBar('gpu-bar', gpuPct);
+        } else { document.getElementById('gpu-pct').textContent = 'N/A'; }
+    } catch(e) {}
+}
+
+// ── Init ──────────────────────────────────────────────────
+loadSessions();
+loadCloudModels();
+loadBalances();
+updateSystemStats();
+setInterval(updateSystemStats, 5000);
+setInterval(loadBalances, 30000);
+
+// Load current mode
+api('/api/mode').then(r=>r.json()).then(d => { if(d.mode) document.getElementById('mode-selector').value = d.mode; }).catch(()=>{});
+</script>
+</body>
+</html>

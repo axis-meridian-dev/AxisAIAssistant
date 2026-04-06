@@ -10,6 +10,7 @@ Capabilities:
 - Type text / send keystrokes
 """
 
+import shlex
 import subprocess
 import shutil
 import os
@@ -19,30 +20,56 @@ from datetime import datetime
 
 from tools.base import BaseTool
 
+# Apps safe to launch directly (no shell needed)
+_ALLOWED_APPS = {
+    "firefox", "chromium", "chromium-browser", "google-chrome",
+    "code", "gedit", "nano", "vim", "nvim", "kate", "mousepad",
+    "nautilus", "thunar", "nemo", "dolphin", "pcmanfm",
+    "terminal", "gnome-terminal", "konsole", "xfce4-terminal", "alacritty", "kitty",
+    "gimp", "inkscape", "libreoffice", "vlc", "mpv", "eog", "evince",
+    "htop", "btop", "pavucontrol", "gnome-calculator", "xdg-open",
+}
+
 
 class DesktopControlTool(BaseTool):
-    
+
     def launch_app(self, app_name: str) -> str:
         """Launch an application by name."""
+        parts = shlex.split(app_name)
+        if not parts:
+            return "No application specified."
+
+        binary = parts[0]
+
+        # If it looks like a URL or file path, use xdg-open
+        if binary.startswith(("http://", "https://", "/", "~")):
+            try:
+                subprocess.Popen(
+                    ["xdg-open", binary],
+                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    start_new_session=True
+                )
+                return f"Opened with xdg-open: {binary}"
+            except Exception as e:
+                return f"Failed to open {binary}: {e}"
+
+        # Only allow known-safe binaries
+        base_name = os.path.basename(binary)
+        if base_name not in _ALLOWED_APPS and not shutil.which(binary):
+            return f"Unknown application: {binary}. Not in allowed list and not found in PATH."
+
+        if base_name not in _ALLOWED_APPS:
+            return f"Application '{binary}' exists but is not in the allowed launch list. Add it to _ALLOWED_APPS in desktop_control.py to enable."
+
         try:
-            # Try direct command first
             subprocess.Popen(
-                app_name, shell=True,
+                parts, shell=False,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 start_new_session=True
             )
             return f"Launched: {app_name}"
-        except Exception:
-            # Try xdg-open for file types / URLs
-            try:
-                subprocess.Popen(
-                    ["xdg-open", app_name],
-                    stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                    start_new_session=True
-                )
-                return f"Opened with xdg-open: {app_name}"
-            except Exception as e:
-                return f"Failed to launch {app_name}: {e}"
+        except Exception as e:
+            return f"Failed to launch {app_name}: {e}"
     
     def list_windows(self) -> str:
         """List all open windows."""

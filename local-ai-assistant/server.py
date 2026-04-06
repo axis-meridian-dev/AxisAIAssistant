@@ -9,30 +9,118 @@ Then open: http://localhost:5000
 
 import json
 import asyncio
+import logging
+import os
+import re
+import secrets
 import subprocess
 import threading
 from pathlib import Path
 from datetime import datetime
+from functools import wraps
 
-from flask import Flask, request, jsonify, send_file, Response
+from flask import Flask, request, jsonify, send_file, Response, session, abort
+from flask_limiter import Limiter
+from flask_limiter.util import get_remote_address
 import ollama
 
 from agent import Agent
 from config import load_config
-from config_utils import save_config_safe
-from stats import InquiryStats
+from cloud_reasoning import MODELS as CLOUD_MODELS
+from log import setup_logging
 
-app = Flask(__name__)
+setup_logging()
+logger = logging.getLogger("ai_assistant.server")
+
+app = Flask(__name__, template_folder="templates")
+app.secret_key = os.environ.get("FLASK_SECRET_KEY", secrets.token_hex(32))
+
+# ── Rate Limiting ───────────────────────────────────────────────────────────
+
+limiter = Limiter(
+    get_remote_address,
+    app=app,
+    default_limits=["120 per minute"],
+    storage_uri="memory://",
+)
+
+# ── Authentication ──────────────────────────────────────────────────────────
+
+AUTH_TOKEN = os.environ.get("DASHBOARD_TOKEN", "")
+_auth_initialized = False
 
 
-# ── CORS middleware ────────────────────────────────────────────────────────
+def require_auth(f):
+    """Protect endpoints with token-based auth (if DASHBOARD_TOKEN is set)."""
+    @wraps(f)
+    def decorated(*args, **kwargs):
+        if not AUTH_TOKEN:
+            return f(*args, **kwargs)
+        if session.get("authenticated"):
+            return f(*args, **kwargs)
+        token = request.headers.get("X-Auth-Token") or request.args.get("token")
+        if token == AUTH_TOKEN:
+            session["authenticated"] = True
+            return f(*args, **kwargs)
+        return jsonify({"error": "Unauthorized"}), 401
+    return decorated
+
+
+# ── CSRF Protection ─────────────────────────────────────────────────────────
+
+def generate_csrf_token():
+    if "csrf_token" not in session:
+        session["csrf_token"] = secrets.token_hex(32)
+    return session["csrf_token"]
+
+
 @app.after_request
-def add_cors_headers(response):
-    """Allow LAN access for multi-device usage."""
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+def set_csrf_cookie(response):
+    if "csrf_token" in session:
+        response.set_cookie("csrf_token", session["csrf_token"], samesite="Strict", httponly=False)
     return response
+
+
+@app.before_request
+def check_csrf():
+    if request.method in ("GET", "HEAD", "OPTIONS"):
+        return
+    # Exempt the login endpoint and SSE streams
+    if request.endpoint in ("index", "login", "pull_model"):
+        return
+    token = request.headers.get("X-CSRF-Token") or request.form.get("csrf_token")
+    if "csrf_token" in session and token != session["csrf_token"]:
+        abort(403)
+
+
+# ── Request Logging ─────────────────────────────────────────────────────────
+
+@app.before_request
+def log_request():
+    logger.info("%s %s from %s", request.method, request.path, request.remote_addr)
+
+
+@app.after_request
+def log_response(response):
+    if response.status_code >= 400:
+        logger.warning("%s %s → %s", request.method, request.path, response.status_code)
+    return response
+
+
+# ── Input Validation Helpers ────────────────────────────────────────────────
+
+MAX_MESSAGE_LENGTH = 50000  # ~50k chars
+MODEL_NAME_RE = re.compile(r'^[a-zA-Z0-9_.:\-/]+$')
+
+
+def validate_model_name(name: str) -> bool:
+    return bool(name) and len(name) < 200 and MODEL_NAME_RE.match(name)
+
+
+def safe_error(msg: str, code: int = 500):
+    """Return a sanitized error without leaking internals."""
+    return jsonify({"error": msg}), code
+
 
 # ── Global state ────────────────────────────────────────────────────────────
 
@@ -52,64 +140,280 @@ def get_agent():
 
 @app.route("/")
 def index():
-    return send_file("dashboard.html")
+    generate_csrf_token()
+    return send_file("templates/dashboard.html")
+
+
+@app.route("/api/login", methods=["POST"])
+def login():
+    """Authenticate with a token (if DASHBOARD_TOKEN is set)."""
+    if not AUTH_TOKEN:
+        return jsonify({"success": True, "message": "No auth required"})
+    token = (request.json or {}).get("token", "")
+    if secrets.compare_digest(token, AUTH_TOKEN):
+        session["authenticated"] = True
+        generate_csrf_token()
+        return jsonify({"success": True})
+    return jsonify({"error": "Invalid token"}), 401
 
 
 @app.route("/api/chat", methods=["POST"])
+@require_auth
+@limiter.limit("30 per minute")
 def chat():
     """Send a message to the agent and get a response."""
-    data = request.json
+    data = request.json or {}
     message = data.get("message", "")
 
     if not message.strip():
-        return jsonify({"error": "Empty message"}), 400
+        return safe_error("Empty message", 400)
+    if len(message) > MAX_MESSAGE_LENGTH:
+        return safe_error(f"Message too long (max {MAX_MESSAGE_LENGTH} chars)", 400)
 
     import time as _time
     start = _time.time()
 
     with agent_lock:
         a = get_agent()
+        model_override = data.get("cloud_model")
+        if model_override:
+            if model_override not in CLOUD_MODELS:
+                return safe_error("Unknown cloud model", 400)
+            a.cloud_model_override = model_override
+
         loop = asyncio.new_event_loop()
         try:
             response = loop.run_until_complete(a.process(message))
         except Exception as e:
-            response = f"Error: {e}"
+            logger.exception("Chat processing error")
+            response = "Sorry, an error occurred while processing your request."
         finally:
             loop.close()
 
     elapsed = _time.time() - start
 
-    # Track inquiry stats in server mode
-    try:
-        inquiry = InquiryStats(
-            query=message,
-            model=config["llm"]["primary_model"],
-            total_time=elapsed,
-            response_chars=len(response),
-            timestamp=datetime.now().isoformat(),
-        )
-        a.session_stats.record_inquiry(inquiry)
-    except Exception:
-        pass
+    with agent_lock:
+        balances = a.cloud.get_balances()
+        monthly_spend = a.cloud.monthly_spend
 
     return jsonify({
         "response": response,
         "model": config["llm"]["primary_model"],
+        "cloud_model": a.cloud_model_override,
+        "session_id": a.session_stats.session_id,
         "timestamp": datetime.now().isoformat(),
         "response_time": round(elapsed, 2),
+        "balances": balances,
+        "monthly_spend": round(monthly_spend, 4),
+        "history_truncated": getattr(a, '_history_truncated', False),
     })
 
 
+# ── Session Management ──────────────────────────────────────────────────────
+
+@app.route("/api/sessions", methods=["GET"])
+@require_auth
+def list_sessions():
+    """List all saved chat sessions."""
+    a = get_agent()
+    sessions = a.session_stats.list_chat_sessions(limit=50)
+    return jsonify({
+        "sessions": sessions,
+        "current_session": a.session_stats.session_id,
+    })
+
+
+@app.route("/api/sessions/new", methods=["POST"])
+@require_auth
+def new_session():
+    """Start a new chat session."""
+    with agent_lock:
+        a = get_agent()
+        a.new_session()
+    return jsonify({
+        "success": True,
+        "session_id": a.session_stats.session_id,
+    })
+
+
+@app.route("/api/sessions/<session_id>/load", methods=["POST"])
+@require_auth
+def load_session(session_id):
+    """Resume a previous session."""
+    if not re.match(r'^[a-zA-Z0-9_-]+$', session_id):
+        return safe_error("Invalid session ID", 400)
+    with agent_lock:
+        a = get_agent()
+        success = a.load_session(session_id)
+    if not success:
+        return safe_error("Session not found", 404)
+    return jsonify({
+        "success": True,
+        "session_id": a.session_stats.session_id,
+        "messages": a.history,
+    })
+
+
+@app.route("/api/sessions/<session_id>/rename", methods=["POST"])
+@require_auth
+def rename_session(session_id):
+    """Rename a chat session."""
+    if not re.match(r'^[a-zA-Z0-9_-]+$', session_id):
+        return safe_error("Invalid session ID", 400)
+    data = request.json or {}
+    title = data.get("title", "").strip()
+    if not title:
+        return safe_error("Title required", 400)
+    if len(title) > 200:
+        return safe_error("Title too long", 400)
+
+    a = get_agent()
+    if session_id == a.session_stats.session_id:
+        a.session_stats.rename_session(title)
+    else:
+        session_file = a.session_stats.history_dir / f"chat_{session_id}.json"
+        if session_file.exists():
+            try:
+                with open(session_file) as f:
+                    sdata = json.load(f)
+                sdata["title"] = title
+                with open(session_file, "w") as f:
+                    json.dump(sdata, f, indent=2)
+            except (json.JSONDecodeError, IOError):
+                return safe_error("Failed to rename session")
+        else:
+            return safe_error("Session not found", 404)
+
+    return jsonify({"success": True})
+
+
+@app.route("/api/sessions/<session_id>", methods=["DELETE"])
+@require_auth
+def delete_session(session_id):
+    """Delete a saved chat session."""
+    if not re.match(r'^[a-zA-Z0-9_-]+$', session_id):
+        return safe_error("Invalid session ID", 400)
+    a = get_agent()
+    if a.session_stats.delete_chat_session(session_id):
+        return jsonify({"success": True})
+    return safe_error("Session not found", 404)
+
+
+@app.route("/api/sessions/<session_id>/export", methods=["GET"])
+@require_auth
+def export_session(session_id):
+    """Export a chat session as JSON download."""
+    if not re.match(r'^[a-zA-Z0-9_-]+$', session_id):
+        return safe_error("Invalid session ID", 400)
+    a = get_agent()
+    session_file = a.session_stats.history_dir / f"chat_{session_id}.json"
+    if not session_file.exists():
+        return safe_error("Session not found", 404)
+    return send_file(session_file, as_attachment=True, download_name=f"chat_{session_id}.json")
+
+
+# ── Cloud Model Selection & Balances ────────────────────────────────────────
+
+@app.route("/api/cloud/models", methods=["GET"])
+@require_auth
+def list_cloud_models():
+    """List all cloud models with pricing, availability, and balance info."""
+    a = get_agent()
+    models = []
+    for model_id, info in CLOUD_MODELS.items():
+        models.append({
+            "id": model_id,
+            "name": info["name"],
+            "provider": info["provider"],
+            "tier": info["tier"],
+            "speed": info["speed"],
+            "input_price": info["input"],
+            "output_price": info["output"],
+            "context": info["context"],
+            "strengths": info["strengths"],
+            "affordable": a.cloud.can_afford(model_id),
+        })
+    return jsonify({
+        "models": models,
+        "active_model": a.cloud_model_override,
+        "default_anthropic": a.cloud.default_anthropic,
+        "default_openai": a.cloud.default_openai,
+    })
+
+
+@app.route("/api/cloud/model", methods=["POST"])
+@require_auth
+def set_cloud_model():
+    """Set the active cloud model (or 'auto' for smart routing)."""
+    data = request.json or {}
+    model_id = data.get("model", "auto")
+
+    with agent_lock:
+        a = get_agent()
+        if model_id == "auto":
+            a.cloud_model_override = None
+        elif model_id in CLOUD_MODELS:
+            a.cloud_model_override = model_id
+        else:
+            return safe_error("Unknown model", 400)
+
+    return jsonify({
+        "success": True,
+        "active_model": a.cloud_model_override,
+    })
+
+
+@app.route("/api/cloud/balances", methods=["GET"])
+@require_auth
+def get_balances():
+    """Get per-provider balances and spend."""
+    with agent_lock:
+        a = get_agent()
+        balances = a.cloud.get_balances()
+        provider_spend = dict(a.cloud.provider_spend)
+        monthly_spend = a.cloud.monthly_spend
+    return jsonify({
+        "balances": balances,
+        "provider_spend": provider_spend,
+        "monthly_spend": round(monthly_spend, 4),
+    })
+
+
+@app.route("/api/cloud/balances", methods=["POST"])
+@require_auth
+def set_balances():
+    """Update starting balances (e.g., after topping up an account)."""
+    data = request.json or {}
+    with agent_lock:
+        a = get_agent()
+        if "anthropic" in data:
+            val = float(data["anthropic"])
+            if val < 0:
+                return safe_error("Balance cannot be negative", 400)
+            a.cloud.provider_balances["anthropic"] = val
+        if "openai" in data:
+            val = float(data["openai"])
+            if val < 0:
+                return safe_error("Balance cannot be negative", 400)
+            a.cloud.provider_balances["openai"] = val
+        a.cloud._save_spend()
+        balances = a.cloud.get_balances()
+    return jsonify({"success": True, "balances": balances})
+
+
+# ── Existing Routes (cleaned up) ────────────────────────────────────────────
+
 @app.route("/api/models", methods=["GET"])
+@require_auth
 def list_models():
-    """List all locally available Ollama.current_models."""
+    """List locally available Ollama models."""
     try:
         result = subprocess.run(
             ["ollama", "list"],
             capture_output=True, text=True, timeout=10
         )
         models = []
-        for line in result.stdout.strip().split("\n")[1:]:  # Skip header
+        for line in result.stdout.strip().split("\n")[1:]:
             parts = line.split()
             if parts:
                 name = parts[0]
@@ -121,11 +425,12 @@ def list_models():
                     "is_fast": name == config["llm"]["fast_model"],
                 })
         return jsonify({"models": models})
-    except Exception as e:
-        return jsonify({"error": str(e), "models": []})
+    except Exception:
+        return jsonify({"error": "Failed to list models", "models": []})
 
 
 @app.route("/api/models/available", methods=["GET"])
+@require_auth
 def available_models():
     """List recommended models that can be downloaded."""
     models = [
@@ -145,14 +450,16 @@ def available_models():
 
 
 @app.route("/api/models/pull", methods=["POST"])
+@require_auth
+@limiter.limit("5 per minute")
 def pull_model():
-    """Start downloading a.current_model. Streams progress."""
-    data = request.json
+    """Start downloading a model. Streams progress."""
+    data = request.json or {}
     model_name = data.get("model", "")
-    
-    if not model_name:
-        return jsonify({"error": "No model specified"}), 400
-    
+
+    if not validate_model_name(model_name):
+        return safe_error("Invalid model name", 400)
+
     def generate():
         process = subprocess.Popen(
             ["ollama", "pull", model_name],
@@ -165,132 +472,137 @@ def pull_model():
             yield f"data: {json.dumps({'line': line.strip()})}\n\n"
         process.wait()
         yield f"data: {json.dumps({'done': True, 'success': process.returncode == 0})}\n\n"
-    
+
     return Response(generate(), mimetype="text/event-stream")
 
 
 @app.route("/api/models/delete", methods=["POST"])
+@require_auth
 def delete_model():
     """Delete a locally downloaded model."""
-    data = request.json
+    data = request.json or {}
     model_name = data.get("model", "")
-    
+
+    if not validate_model_name(model_name):
+        return safe_error("Invalid model name", 400)
+
     try:
         result = subprocess.run(
             ["ollama", "rm", model_name],
             capture_output=True, text=True, timeout=30
         )
         return jsonify({"success": result.returncode == 0, "output": result.stdout})
-    except Exception as e:
-        return jsonify({"error": str(e)})
+    except Exception:
+        return safe_error("Failed to delete model")
 
 
 @app.route("/api/config", methods=["GET"])
+@require_auth
 def get_config():
-    """Get current configuration."""
-    return jsonify(config)
+    """Get current configuration (masks API keys)."""
+    safe = json.loads(json.dumps(config))
+    if "cloud" in safe:
+        for k in ["anthropic_api_key", "openai_api_key"]:
+            if safe["cloud"].get(k):
+                v = safe["cloud"][k]
+                safe["cloud"][k] = v[:8] + "..." + v[-4:] if len(v) > 14 else "***set***"
+    return jsonify(safe)
 
 
 @app.route("/api/config", methods=["POST"])
+@require_auth
 def update_config():
-    """Update configuration and reload agent."""
+    """Update configuration and apply to running agent."""
     global config, agent
-    data = request.json
-    
-    # Deep merge
+    data = request.json or {}
+
     for section, values in data.items():
         if section in config and isinstance(config[section], dict):
             config[section].update(values)
         else:
             config[section] = values
-    
-    # Save to disk (strips API keys)
-    save_config_safe(config)
-    
-    # Reload agent
+
+    # Save to disk (strip API keys)
+    config_path = Path(__file__).parent / "config" / "settings.json"
+    config_path.parent.mkdir(exist_ok=True)
+    safe_config = json.loads(json.dumps(config))
+    if "cloud" in safe_config:
+        safe_config["cloud"].pop("anthropic_api_key", None)
+        safe_config["cloud"].pop("openai_api_key", None)
+    try:
+        with open(config_path, "w") as f:
+            json.dump(safe_config, f, indent=4)
+    except IOError:
+        return safe_error("Failed to save config")
+
+    # Update running agent's config instead of destroying it
     with agent_lock:
-        agent = None
-    
-    return jsonify({"success": True, "config": config})
+        if agent is not None:
+            agent.config = config
+
+    return jsonify({"success": True})
 
 
 @app.route("/api/mode", methods=["GET"])
+@require_auth
 def get_mode():
-    """Get current agent mode."""
     a = get_agent()
     return jsonify({"mode": a.current_mode})
 
 
 @app.route("/api/mode", methods=["POST"])
+@require_auth
 def set_mode():
-    """Set agent operating mode."""
-    data = request.json
+    data = request.json or {}
     mode = data.get("mode", "general")
     a = get_agent()
-    result = setattr(a, "current_mode", mode) or mode
-    return jsonify({"success": "Invalid" not in result, "mode": a.current_mode, "message": result})
+    result = a.set_mode(mode)
+    return jsonify({"success": "Invalid" not in result, "mode": a.mode, "message": result})
 
 
 @app.route("/api/tools", methods=["GET"])
+@require_auth
 def list_tools():
-    """List all available tool modules and their functions."""
     a = get_agent()
+    enabled_tools = config.get("enabled_tools", {})
     tools = {}
-
-    # All known tool names
-    all_tools = [
-        "file_manager", "web_search", "desktop_control", "system_info",
-        "knowledge_base", "legal_research", "document_writer"
-    ]
-
-    for name in all_tools:
-        if name in a.tool_instances:
-            instance = a.tool_instances[name]
-            funcs = []
-            for defn in instance.get_tool_definitions():
-                funcs.append({
-                    "name": defn["function"]["name"],
-                    "description": defn["function"].get("description", ""),
-                })
-            tools[name] = {
-                "enabled": True,
-                "function_count": len(funcs),
-                "functions": funcs,
-            }
-        else:
-            tools[name] = {"enabled": False, "function_count": 0, "functions": []}
-
+    for name, instance in a.tool_instances.items():
+        funcs = []
+        for defn in instance.get_tool_definitions():
+            funcs.append({
+                "name": defn["function"]["name"],
+                "description": defn["function"].get("description", ""),
+            })
+        is_enabled = enabled_tools.get(name, True)
+        tools[name] = {"enabled": is_enabled, "function_count": len(funcs), "functions": funcs}
     return jsonify(tools)
 
 
 @app.route("/api/tools/toggle", methods=["POST"])
+@require_auth
 def toggle_tool():
-    """Enable or disable a tool module. Requires agent reload."""
-    global agent
-    data = request.json
+    data = request.json or {}
     tool_name = data.get("tool", "")
     enabled = data.get("enabled", True)
-    
-    # Store enabled/disabled state in config
+
     if "enabled_tools" not in config:
         config["enabled_tools"] = {}
     config["enabled_tools"][tool_name] = enabled
-    
-    # Save config (strips API keys)
-    save_config_safe(config)
-    
-    # Reload agent
+
+    # Apply to running agent without destroying it
     with agent_lock:
-        agent = None
-    
+        if agent is not None:
+            agent.apply_tool_toggles(config.get("enabled_tools", {}))
+
     return jsonify({"success": True, "tool": tool_name, "enabled": enabled})
 
 
 @app.route("/api/system", methods=["GET"])
+@require_auth
+@limiter.limit("30 per minute")
 def system_info():
-    """Get system stats — RAM, GPU, disk, swap."""
     import psutil
-    
+
     info = {
         "ram": {
             "total": psutil.virtual_memory().total,
@@ -311,8 +623,7 @@ def system_info():
         "cpu_percent": psutil.cpu_percent(interval=0.5),
         "cpu_count": psutil.cpu_count(),
     }
-    
-    # GPU info
+
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
@@ -330,13 +641,13 @@ def system_info():
             }
     except Exception:
         info["gpu"] = None
-    
+
     return jsonify(info)
 
 
 @app.route("/api/knowledge/stats", methods=["GET"])
+@require_auth
 def knowledge_stats():
-    """Get knowledge base statistics."""
     a = get_agent()
     if "knowledge_base" in a.tool_instances:
         kb = a.tool_instances["knowledge_base"]
@@ -349,12 +660,12 @@ def knowledge_stats():
 
 
 @app.route("/api/legal/files", methods=["GET"])
+@require_auth
 def legal_files():
-    """List legal research library contents."""
     legal_dir = Path.home() / "LegalResearch"
     if not legal_dir.exists():
         return jsonify({"categories": {}})
-    
+
     categories = {}
     for d in sorted(legal_dir.iterdir()):
         if d.is_dir():
@@ -365,212 +676,18 @@ def legal_files():
                 "size": f.stat().st_size,
                 "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
             } for f in files[:50]]
-    
+
     return jsonify({"categories": categories})
 
 
 @app.route("/api/chat/clear", methods=["POST"])
+@require_auth
 def clear_chat():
-    """Clear conversation history, saving the old session first."""
     a = get_agent()
     if a.history:
         a.session_stats.save_chat_session(a.history)
     a.clear_history()
-    return jsonify({"success": True})
-
-
-@app.route("/api/chat/history", methods=["GET"])
-def chat_history_list():
-    """List saved chat sessions."""
-    a = get_agent()
-    sessions = a.session_stats.list_chat_sessions(limit=30)
-    return jsonify({"sessions": sessions})
-
-
-@app.route("/api/chat/history/<session_id>", methods=["GET"])
-def chat_history_load(session_id):
-    """Load a specific chat session."""
-    a = get_agent()
-    session = a.session_stats.load_chat_session(session_id)
-    if session is None:
-        return jsonify({"error": "Session not found"}), 404
-    return jsonify(session)
-
-
-@app.route("/api/chat/history/<session_id>", methods=["DELETE"])
-def chat_history_delete(session_id):
-    """Delete a saved chat session."""
-    a = get_agent()
-    session_file = a.session_stats.history_dir / f"chat_{session_id}.json"
-    if session_file.exists():
-        session_file.unlink()
-        return jsonify({"success": True})
-    return jsonify({"error": "Session not found"}), 404
-
-
-
-
-@app.route("/api/cloud", methods=["GET"])
-def get_cloud_config():
-    """Get cloud reasoning configuration (hides API key)."""
-    cloud = config.get("cloud", {})
-    safe = dict(cloud)
-    # Mask the API keys
-    for k in ["anthropic_api_key", "openai_api_key"]:
-        if safe.get(k):
-            safe[k] = safe[k][:10] + "..." + safe[k][-4:] if len(safe.get(k,"")) > 14 else "***set***"
-    
-    # Add spend info
-    try:
-        from cloud_reasoning import CloudReasoner
-        cr = CloudReasoner(config)
-        safe["monthly_spend"] = round(cr.monthly_spend, 4)
-        safe["budget_remaining"] = round(max(0, cr.max_budget - cr.monthly_spend), 2)
-    except:
-        safe["monthly_spend"] = 0
-        safe["budget_remaining"] = safe.get("max_monthly_budget", 0)
-    
-    return jsonify(safe)
-
-
-@app.route("/api/cloud", methods=["POST"])
-def update_cloud_config():
-    """Update cloud reasoning settings."""
-    global config, agent
-    data = request.json
-    
-    if "cloud" not in config:
-        config["cloud"] = {}
-    
-    # Update only provided fields
-    for key in ["provider", "anthropic_model", "openai_model", "enabled", 
-                 "auto_route", "max_monthly_budget"]:
-        if key in data:
-            config["cloud"][key] = data[key]
-    
-    # Handle API key updates (only if non-masked value provided)
-    for key in ["anthropic_api_key", "openai_api_key"]:
-        if key in data and "..." not in data[key] and data[key] != "***set***":
-            config["cloud"][key] = data[key]
-    
-    # Save config (strips API keys)
-    save_config_safe(config)
-    
-    # Reload agent
-    with agent_lock:
-        agent = None
-    
-    return jsonify({"success": True})
-
-
-
-
-@app.route("/api/chat/cloud", methods=["POST"])
-def chat_cloud():
-    """Send a message directly to cloud LLM — delegates to CloudReasoner."""
-    data = request.json
-    message = data.get("message", "")
-    history = data.get("history", [])
-
-    if not message.strip():
-        return jsonify({"error": "Empty message"}), 400
-
-    cloud_cfg = config.get("cloud", {})
-    if not cloud_cfg.get("enabled"):
-        return jsonify({"error": "Cloud not enabled", "response": "Cloud mode is not enabled. Go to Settings > Cloud Reasoning and enable it."}), 200
-
-    try:
-        from cloud_reasoning import CloudReasoner
-        cr = CloudReasoner(config)
-
-        model = cr.select_model(message, "legal", "analysis")
-
-        # Build messages for CloudReasoner
-        api_messages = []
-        for msg in history[-20:]:
-            if msg.get("role") in ("user", "assistant"):
-                api_messages.append({"role": msg["role"], "content": msg["content"]})
-        api_messages.append({"role": "user", "content": message})
-
-        a = get_agent()
-        system_prompt = a.system_prompt if hasattr(a, "system_prompt") else ""
-
-        result = cr.query(api_messages, system_prompt, model=model)
-        if result is None:
-            return jsonify({"response": "Cloud query failed — check API keys.", "model": "error"})
-
-        return jsonify({
-            "response": result,
-            "model": model,
-            "cost": round(cr.monthly_spend, 4),
-            "monthly_spend": cr.monthly_spend,
-            "timestamp": datetime.now().isoformat(),
-        })
-
-    except ImportError:
-        return jsonify({"response": "Error: pip install anthropic openai", "model": "error"})
-    except Exception as e:
-        return jsonify({"response": f"Cloud error: {e}", "model": "error"})
-
-
-@app.route("/api/chat/stream", methods=["POST"])
-def chat_stream():
-    """SSE streaming endpoint for chat — streams tokens as they arrive."""
-    data = request.json
-    message = data.get("message", "")
-
-    if not message.strip():
-        return jsonify({"error": "Empty message"}), 400
-
-    def generate():
-        import time as _time
-        start = _time.time()
-
-        with agent_lock:
-            a = get_agent()
-            loop = asyncio.new_event_loop()
-            try:
-                response = loop.run_until_complete(a.process(message))
-            except Exception as e:
-                response = f"Error: {e}"
-            finally:
-                loop.close()
-
-        elapsed = _time.time() - start
-
-        # Track inquiry stats in server mode
-        try:
-            inquiry = InquiryStats(
-                query=message,
-                model=config["llm"]["primary_model"],
-                total_time=elapsed,
-                response_chars=len(response),
-                timestamp=datetime.now().isoformat(),
-            )
-            a.session_stats.record_inquiry(inquiry)
-        except Exception:
-            pass
-
-        # Send full response as a single SSE event
-        yield f"data: {json.dumps({'token': response, 'done': False})}\n\n"
-        yield f"data: {json.dumps({'done': True, 'model': config['llm']['primary_model'], 'response_time': round(elapsed, 2)})}\n\n"
-
-    return Response(generate(), mimetype="text/event-stream")
-
-
-@app.route("/api/stats", methods=["GET"])
-def get_stats():
-    """Get session and inquiry statistics."""
-    a = get_agent()
-    try:
-        return jsonify({
-            "session_summary": a.session_stats.format_session_summary(),
-            "model_stats": a.session_stats.model_stats,
-            "inquiry_count": len(a.session_stats.inquiries),
-            "available": True,
-        })
-    except Exception:
-        return jsonify({"available": False})
+    return jsonify({"success": True, "session_id": a.session_stats.session_id})
 
 
 # ── Run ─────────────────────────────────────────────────────────────────────
@@ -578,4 +695,6 @@ def get_stats():
 if __name__ == "__main__":
     print("\n  Local AI Assistant — Dashboard")
     print("  Open in browser: http://localhost:5000\n")
-    app.run(host="0.0.0.0", port=5000, debug=False, threaded=True)
+    host = os.environ.get("DASHBOARD_HOST", "127.0.0.1")
+    port = int(os.environ.get("DASHBOARD_PORT", "5000"))
+    app.run(host=host, port=port, debug=False, threaded=True)
