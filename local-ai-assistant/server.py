@@ -1,5 +1,3 @@
-from config_utils import save_config_safe
-from config_utils import save_config_safe
 #!/usr/bin/env python3
 """
 Local AI Assistant — Web Dashboard Server
@@ -21,6 +19,10 @@ import ollama
 
 from agent import Agent
 from config import load_config
+from cloud_reasoning import MODELS as CLOUD_MODELS
+from log import setup_logging
+
+setup_logging()
 
 app = Flask(__name__, template_folder="templates")
 
@@ -59,6 +61,11 @@ def chat():
 
     with agent_lock:
         a = get_agent()
+        # Apply model override if provided
+        model_override = data.get("cloud_model")
+        if model_override:
+            a.cloud_model_override = model_override
+
         loop = asyncio.new_event_loop()
         try:
             response = loop.run_until_complete(a.process(message))
@@ -68,25 +75,181 @@ def chat():
             loop.close()
 
     elapsed = _time.time() - start
+    balances = a.cloud.get_balances()
 
     return jsonify({
         "response": response,
         "model": config["llm"]["primary_model"],
+        "cloud_model": a.cloud_model_override,
+        "session_id": a.session_stats.session_id,
         "timestamp": datetime.now().isoformat(),
         "response_time": round(elapsed, 2),
+        "balances": balances,
+        "monthly_spend": round(a.cloud.monthly_spend, 4),
     })
 
 
+# ── Session Management ──────────────────────────────────────────────────────
+
+@app.route("/api/sessions", methods=["GET"])
+def list_sessions():
+    """List all saved chat sessions."""
+    a = get_agent()
+    sessions = a.session_stats.list_chat_sessions(limit=50)
+    return jsonify({
+        "sessions": sessions,
+        "current_session": a.session_stats.session_id,
+    })
+
+
+@app.route("/api/sessions/new", methods=["POST"])
+def new_session():
+    """Start a new chat session."""
+    with agent_lock:
+        a = get_agent()
+        a.new_session()
+    return jsonify({
+        "success": True,
+        "session_id": a.session_stats.session_id,
+    })
+
+
+@app.route("/api/sessions/<session_id>/load", methods=["POST"])
+def load_session(session_id):
+    """Resume a previous session."""
+    with agent_lock:
+        a = get_agent()
+        success = a.load_session(session_id)
+    if not success:
+        return jsonify({"error": "Session not found"}), 404
+    return jsonify({
+        "success": True,
+        "session_id": a.session_stats.session_id,
+        "messages": a.history,
+    })
+
+
+@app.route("/api/sessions/<session_id>/rename", methods=["POST"])
+def rename_session(session_id):
+    """Rename a chat session."""
+    data = request.json
+    title = data.get("title", "").strip()
+    if not title:
+        return jsonify({"error": "Title required"}), 400
+
+    a = get_agent()
+    # If renaming current session
+    if session_id == a.session_stats.session_id:
+        a.session_stats.rename_session(title)
+    else:
+        # Load, rename, don't switch
+        session_file = a.session_stats.history_dir / f"chat_{session_id}.json"
+        if session_file.exists():
+            with open(session_file) as f:
+                sdata = json.load(f)
+            sdata["title"] = title
+            with open(session_file, "w") as f:
+                json.dump(sdata, f, indent=2)
+        else:
+            return jsonify({"error": "Session not found"}), 404
+
+    return jsonify({"success": True})
+
+
+@app.route("/api/sessions/<session_id>", methods=["DELETE"])
+def delete_session(session_id):
+    """Delete a saved chat session."""
+    a = get_agent()
+    if a.session_stats.delete_chat_session(session_id):
+        return jsonify({"success": True})
+    return jsonify({"error": "Session not found"}), 404
+
+
+# ── Cloud Model Selection & Balances ────────────────────────────────────────
+
+@app.route("/api/cloud/models", methods=["GET"])
+def list_cloud_models():
+    """List all cloud models with pricing, availability, and balance info."""
+    a = get_agent()
+    models = []
+    for model_id, info in CLOUD_MODELS.items():
+        models.append({
+            "id": model_id,
+            "name": info["name"],
+            "provider": info["provider"],
+            "tier": info["tier"],
+            "speed": info["speed"],
+            "input_price": info["input"],
+            "output_price": info["output"],
+            "context": info["context"],
+            "strengths": info["strengths"],
+            "affordable": a.cloud.can_afford(model_id),
+        })
+    return jsonify({
+        "models": models,
+        "active_model": a.cloud_model_override,
+        "default_anthropic": a.cloud.default_anthropic,
+        "default_openai": a.cloud.default_openai,
+    })
+
+
+@app.route("/api/cloud/model", methods=["POST"])
+def set_cloud_model():
+    """Set the active cloud model (or 'auto' for smart routing)."""
+    data = request.json
+    model_id = data.get("model", "auto")
+
+    with agent_lock:
+        a = get_agent()
+        if model_id == "auto":
+            a.cloud_model_override = None
+        elif model_id in CLOUD_MODELS:
+            a.cloud_model_override = model_id
+        else:
+            return jsonify({"error": f"Unknown model: {model_id}"}), 400
+
+    return jsonify({
+        "success": True,
+        "active_model": a.cloud_model_override,
+    })
+
+
+@app.route("/api/cloud/balances", methods=["GET"])
+def get_balances():
+    """Get per-provider balances and spend."""
+    a = get_agent()
+    return jsonify({
+        "balances": a.cloud.get_balances(),
+        "provider_spend": dict(a.cloud.provider_spend),
+        "monthly_spend": round(a.cloud.monthly_spend, 4),
+    })
+
+
+@app.route("/api/cloud/balances", methods=["POST"])
+def set_balances():
+    """Update starting balances (e.g., after topping up an account)."""
+    data = request.json
+    a = get_agent()
+    if "anthropic" in data:
+        a.cloud.provider_balances["anthropic"] = float(data["anthropic"])
+    if "openai" in data:
+        a.cloud.provider_balances["openai"] = float(data["openai"])
+    a.cloud._save_spend()
+    return jsonify({"success": True, "balances": a.cloud.get_balances()})
+
+
+# ── Existing Routes (cleaned up) ────────────────────────────────────────────
+
 @app.route("/api/models", methods=["GET"])
 def list_models():
-    """List all locally available Ollama.current_models."""
+    """List locally available Ollama models."""
     try:
         result = subprocess.run(
             ["ollama", "list"],
             capture_output=True, text=True, timeout=10
         )
         models = []
-        for line in result.stdout.strip().split("\n")[1:]:  # Skip header
+        for line in result.stdout.strip().split("\n")[1:]:
             parts = line.split()
             if parts:
                 name = parts[0]
@@ -123,13 +286,13 @@ def available_models():
 
 @app.route("/api/models/pull", methods=["POST"])
 def pull_model():
-    """Start downloading a.current_model. Streams progress."""
+    """Start downloading a model. Streams progress."""
     data = request.json
     model_name = data.get("model", "")
-    
+
     if not model_name:
         return jsonify({"error": "No model specified"}), 400
-    
+
     def generate():
         process = subprocess.Popen(
             ["ollama", "pull", model_name],
@@ -142,7 +305,7 @@ def pull_model():
             yield f"data: {json.dumps({'line': line.strip()})}\n\n"
         process.wait()
         yield f"data: {json.dumps({'done': True, 'success': process.returncode == 0})}\n\n"
-    
+
     return Response(generate(), mimetype="text/event-stream")
 
 
@@ -151,7 +314,7 @@ def delete_model():
     """Delete a locally downloaded model."""
     data = request.json
     model_name = data.get("model", "")
-    
+
     try:
         result = subprocess.run(
             ["ollama", "rm", model_name],
@@ -164,8 +327,14 @@ def delete_model():
 
 @app.route("/api/config", methods=["GET"])
 def get_config():
-    """Get current configuration."""
-    return jsonify(config)
+    """Get current configuration (masks API keys)."""
+    safe = json.loads(json.dumps(config))
+    if "cloud" in safe:
+        for k in ["anthropic_api_key", "openai_api_key"]:
+            if safe["cloud"].get(k):
+                v = safe["cloud"][k]
+                safe["cloud"][k] = v[:8] + "..." + v[-4:] if len(v) > 14 else "***set***"
+    return jsonify(safe)
 
 
 @app.route("/api/config", methods=["POST"])
@@ -173,106 +342,80 @@ def update_config():
     """Update configuration and reload agent."""
     global config, agent
     data = request.json
-    
-    # Deep merge
+
     for section, values in data.items():
         if section in config and isinstance(config[section], dict):
             config[section].update(values)
         else:
             config[section] = values
-    
-    # Save to disk
+
+    # Save to disk (strip API keys)
     config_path = Path(__file__).parent / "config" / "settings.json"
     config_path.parent.mkdir(exist_ok=True)
+    safe_config = json.loads(json.dumps(config))
+    if "cloud" in safe_config:
+        safe_config["cloud"].pop("anthropic_api_key", None)
+        safe_config["cloud"].pop("openai_api_key", None)
     with open(config_path, "w") as f:
-        json.dump(config, f, indent=4)
-    
-    # Reload agent
+        json.dump(safe_config, f, indent=4)
+
     with agent_lock:
         agent = None
-    
-    return jsonify({"success": True, "config": config})
+
+    return jsonify({"success": True})
 
 
 @app.route("/api/mode", methods=["GET"])
 def get_mode():
-    """Get current agent mode."""
     a = get_agent()
     return jsonify({"mode": a.current_mode})
 
 
 @app.route("/api/mode", methods=["POST"])
 def set_mode():
-    """Set agent operating mode."""
     data = request.json
     mode = data.get("mode", "general")
     a = get_agent()
-    result = setattr(a, "current_mode", mode) or mode
-    return jsonify({"success": "Invalid" not in result, "mode": a.current_mode, "message": result})
+    result = a.set_mode(mode)
+    return jsonify({"success": "Invalid" not in result, "mode": a.mode, "message": result})
 
 
 @app.route("/api/tools", methods=["GET"])
 def list_tools():
-    """List all available tool modules and their functions."""
     a = get_agent()
     tools = {}
-
-    # All known tool names
-    all_tools = [
-        "file_manager", "web_search", "desktop_control", "system_info",
-        "knowledge_base", "legal_research", "document_writer"
-    ]
-
-    for name in all_tools:
-        if name in a.tool_instances:
-            instance = a.tool_instances[name]
-            funcs = []
-            for defn in instance.get_tool_definitions():
-                funcs.append({
-                    "name": defn["function"]["name"],
-                    "description": defn["function"].get("description", ""),
-                })
-            tools[name] = {
-                "enabled": True,
-                "function_count": len(funcs),
-                "functions": funcs,
-            }
-        else:
-            tools[name] = {"enabled": False, "function_count": 0, "functions": []}
-
+    for name, instance in a.tool_instances.items():
+        funcs = []
+        for defn in instance.get_tool_definitions():
+            funcs.append({
+                "name": defn["function"]["name"],
+                "description": defn["function"].get("description", ""),
+            })
+        tools[name] = {"enabled": True, "function_count": len(funcs), "functions": funcs}
     return jsonify(tools)
 
 
 @app.route("/api/tools/toggle", methods=["POST"])
 def toggle_tool():
-    """Enable or disable a tool module. Requires agent reload."""
     global agent
     data = request.json
     tool_name = data.get("tool", "")
     enabled = data.get("enabled", True)
-    
-    # Store enabled/disabled state in config
+
     if "enabled_tools" not in config:
         config["enabled_tools"] = {}
     config["enabled_tools"][tool_name] = enabled
-    
-    # Save config
-    config_path = Path(__file__).parent / "config" / "settings.json"
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=4)
-    
-    # Reload agent
+
     with agent_lock:
         agent = None
-    
+
     return jsonify({"success": True, "tool": tool_name, "enabled": enabled})
 
 
 @app.route("/api/system", methods=["GET"])
 def system_info():
-    """Get system stats — RAM, GPU, disk, swap."""
     import psutil
-    
+
     info = {
         "ram": {
             "total": psutil.virtual_memory().total,
@@ -293,8 +436,7 @@ def system_info():
         "cpu_percent": psutil.cpu_percent(interval=0.5),
         "cpu_count": psutil.cpu_count(),
     }
-    
-    # GPU info
+
     try:
         result = subprocess.run(
             ["nvidia-smi", "--query-gpu=name,memory.used,memory.total,utilization.gpu,temperature.gpu",
@@ -312,13 +454,12 @@ def system_info():
             }
     except Exception:
         info["gpu"] = None
-    
+
     return jsonify(info)
 
 
 @app.route("/api/knowledge/stats", methods=["GET"])
 def knowledge_stats():
-    """Get knowledge base statistics."""
     a = get_agent()
     if "knowledge_base" in a.tool_instances:
         kb = a.tool_instances["knowledge_base"]
@@ -332,11 +473,10 @@ def knowledge_stats():
 
 @app.route("/api/legal/files", methods=["GET"])
 def legal_files():
-    """List legal research library contents."""
     legal_dir = Path.home() / "LegalResearch"
     if not legal_dir.exists():
         return jsonify({"categories": {}})
-    
+
     categories = {}
     for d in sorted(legal_dir.iterdir()):
         if d.is_dir():
@@ -347,225 +487,17 @@ def legal_files():
                 "size": f.stat().st_size,
                 "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
             } for f in files[:50]]
-    
+
     return jsonify({"categories": categories})
 
 
 @app.route("/api/chat/clear", methods=["POST"])
 def clear_chat():
-    """Clear conversation history, saving the old session first."""
     a = get_agent()
     if a.history:
         a.session_stats.save_chat_session(a.history)
     a.clear_history()
-    return jsonify({"success": True})
-
-
-@app.route("/api/chat/history", methods=["GET"])
-def chat_history_list():
-    """List saved chat sessions."""
-    a = get_agent()
-    sessions = a.session_stats.list_chat_sessions(limit=30)
-    return jsonify({"sessions": sessions})
-
-
-@app.route("/api/chat/history/<session_id>", methods=["GET"])
-def chat_history_load(session_id):
-    """Load a specific chat session."""
-    a = get_agent()
-    session = a.session_stats.load_chat_session(session_id)
-    if session is None:
-        return jsonify({"error": "Session not found"}), 404
-    return jsonify(session)
-
-
-@app.route("/api/chat/history/<session_id>", methods=["DELETE"])
-def chat_history_delete(session_id):
-    """Delete a saved chat session."""
-    a = get_agent()
-    session_file = a.session_stats.history_dir / f"chat_{session_id}.json"
-    if session_file.exists():
-        session_file.unlink()
-        return jsonify({"success": True})
-    return jsonify({"error": "Session not found"}), 404
-
-
-
-
-@app.route("/api/cloud", methods=["GET"])
-def get_cloud_config():
-    """Get cloud reasoning configuration (hides API key)."""
-    cloud = config.get("cloud", {})
-    safe = dict(cloud)
-    # Mask the API keys
-    for k in ["anthropic_api_key", "openai_api_key"]:
-        if safe.get(k):
-            safe[k] = safe[k][:10] + "..." + safe[k][-4:] if len(safe.get(k,"")) > 14 else "***set***"
-    
-    # Add spend info
-    try:
-        from cloud_reasoning import CloudReasoner
-        cr = CloudReasoner(config)
-        safe["monthly_spend"] = round(cr.monthly_spend, 4)
-        safe["budget_remaining"] = round(max(0, cr.max_budget - cr.monthly_spend), 2)
-    except:
-        safe["monthly_spend"] = 0
-        safe["budget_remaining"] = safe.get("max_monthly_budget", 0)
-    
-    return jsonify(safe)
-
-
-@app.route("/api/cloud", methods=["POST"])
-def update_cloud_config():
-    """Update cloud reasoning settings."""
-    global config, agent
-    data = request.json
-    
-    if "cloud" not in config:
-        config["cloud"] = {}
-    
-    # Update only provided fields
-    for key in ["provider", "anthropic_model", "openai_model", "enabled", 
-                 "auto_route", "max_monthly_budget"]:
-        if key in data:
-            config["cloud"][key] = data[key]
-    
-    # Handle API key updates (only if non-masked value provided)
-    for key in ["anthropic_api_key", "openai_api_key"]:
-        if key in data and "..." not in data[key] and data[key] != "***set***":
-            config["cloud"][key] = data[key]
-    
-    # Save config
-    config_path = Path(__file__).parent / "config" / "settings.json"
-    config_path.parent.mkdir(exist_ok=True)
-    import json as j
-    with open(config_path, "w") as f:
-        j.dump(config, f, indent=4)
-    
-    # Reload agent
-    with agent_lock:
-        agent = None
-    
-    return jsonify({"success": True})
-
-
-
-
-@app.route("/api/chat/cloud", methods=["POST"])
-def chat_cloud():
-    """Send a message directly to Claude API (bypasses Ollama entirely)."""
-    data = request.json
-    message = data.get("message", "")
-    history = data.get("history", [])
-    
-    if not message.strip():
-        return jsonify({"error": "Empty message"}), 400
-    
-    cloud_cfg = config.get("cloud", {})
-    if not cloud_cfg.get("enabled"):
-        return jsonify({"error": "Cloud not enabled. Enable in Settings.", "response": "Cloud mode is not enabled. Go to Settings > Cloud Reasoning and enable it."}), 200
-    
-    api_key = cloud_cfg.get("anthropic_api_key", "")
-    if not api_key:
-        return jsonify({"error": "No API key", "response": "No Anthropic API key configured. Add it to config/settings.json"}), 200
-    
-    try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        model = cloud_cfg.get("anthropic_model", "claude-sonnet-4-20250514")
-        
-        # Build messages
-        api_messages = []
-        for msg in history[-20:]:  # Last 20 messages for context
-            if msg.get("role") in ("user", "assistant"):
-                api_messages.append({"role": msg["role"], "content": msg["content"]})
-        api_messages.append({"role": "user", "content": message})
-        
-        # Ensure alternating roles
-        cleaned = []
-        for msg in api_messages:
-            if cleaned and cleaned[-1]["role"] == msg["role"]:
-                cleaned[-1]["content"] += "\n\n" + msg["content"]
-            else:
-                cleaned.append(msg)
-        if cleaned and cleaned[0]["role"] != "user":
-            cleaned.insert(0, {"role": "user", "content": "(continuing)"})
-        
-        system_prompt = """You are a legal research assistant for a defendant in Connecticut with active court cases.
-You have access to a local knowledge base of 430+ legal files including CT General Statutes, federal statutes, 
-case law, international human rights instruments, and crime statistics.
-
-The user is Jonathan Sewell, a US Army National Guard infantry veteran (Bravo Company, 1/102nd, Middletown CT) 
-with a registered PTSD service dog. He has active cases in Rockville Superior Court stemming from a 
-August 27, 2024 incident in Mansfield, CT. He has a 15+ year history of encounters with CT law enforcement 
-across multiple departments that he believes constitute a pattern of civil rights violations.
-
-RULES:
-1. Always cite specific statutes (CGS sections, USC sections) and case law with full citations
-2. Be direct, thorough, and adversarial on behalf of the defendant
-3. Reference CT-specific law including Article I § 7 (broader than 4th Amendment) and PA 20-1 (Police Accountability Act)
-4. When discussing his cases, identify every weakness in the state's case
-5. End legal responses with confidence scoring
-6. This is legal research, not legal advice — include disclaimer when producing formal analysis
-
-Be direct. No filler. The user is intelligent and capable — he built this entire AI system himself."""
-
-        response = client.messages.create(
-            model=model,
-            max_tokens=8192,
-            system=system_prompt,
-            messages=cleaned,
-        )
-        
-        result = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                result += block.text
-        
-        # Track cost
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        
-        pricing = {
-            "claude-opus-4-6": {"input": 5.0, "output": 25.0},
-            "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
-            "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
-        }
-        rates = pricing.get(model, {"input": 5.0, "output": 25.0})
-        cost = (input_tokens / 1_000_000 * rates["input"] + 
-                output_tokens / 1_000_000 * rates["output"])
-        
-        # Update spend tracker
-        import json as j
-        spend_file = Path.home() / ".local" / "share" / "ai-assistant" / "cloud_spend.json"
-        spend_file.parent.mkdir(parents=True, exist_ok=True)
-        spend_data = {"month": "", "spend": 0}
-        if spend_file.exists():
-            with open(spend_file) as f:
-                spend_data = j.load(f)
-        
-        from datetime import datetime as dt
-        current_month = dt.now().strftime("%Y-%m")
-        if spend_data.get("month") != current_month:
-            spend_data = {"month": current_month, "spend": 0}
-        spend_data["spend"] = round(spend_data["spend"] + cost, 4)
-        spend_data["updated"] = dt.now().isoformat()
-        with open(spend_file, "w") as f:
-            j.dump(spend_data, f, indent=2)
-        
-        return jsonify({
-            "response": result,
-            "model": model,
-            "cost": round(cost, 4),
-            "monthly_spend": spend_data["spend"],
-            "tokens": {"input": input_tokens, "output": output_tokens},
-            "timestamp": dt.now().isoformat()
-        })
-        
-    except ImportError:
-        return jsonify({"response": "Error: pip install anthropic", "model": "error"})
-    except Exception as e:
-        return jsonify({"response": f"Cloud error: {e}", "model": "error"})
+    return jsonify({"success": True, "session_id": a.session_stats.session_id})
 
 
 # ── Run ─────────────────────────────────────────────────────────────────────
