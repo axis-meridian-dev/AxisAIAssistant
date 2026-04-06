@@ -363,6 +363,18 @@ body {
 .setting-input { background: var(--bg-tertiary); border: 1px solid var(--border); border-radius: var(--radius); padding: 8px 12px; color: var(--text-primary); font-family: var(--font-mono); font-size: 13px; outline: none; width: 200px; text-align: right; }
 .setting-input:focus { border-color: var(--accent); }
 
+/* ── Toast notifications ──────────────────────────────── */
+.toast {
+    position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+    padding: 12px 20px; border-radius: var(--radius); font-size: 13px;
+    color: #fff; opacity: 0; transform: translateY(10px);
+    transition: opacity 0.3s, transform 0.3s; pointer-events: none;
+}
+.toast.show { opacity: 1; transform: translateY(0); }
+.toast.success { background: #16a34a; }
+.toast.error { background: #dc2626; }
+.toast.warn { background: #d97706; }
+
 ::-webkit-scrollbar { width: 6px; }
 ::-webkit-scrollbar-track { background: transparent; }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
@@ -572,8 +584,29 @@ body {
     </div>
 
 </div>
+<div class="toast" id="toast"></div>
 
 <script>
+// ── CSRF + Fetch Wrapper ─────────────────────────────────
+function getCsrf() {
+    const m = document.cookie.match(/csrf_token=([^;]+)/);
+    return m ? m[1] : '';
+}
+
+function api(url, opts = {}) {
+    opts.headers = Object.assign({'Content-Type': 'application/json', 'X-CSRF-Token': getCsrf()}, opts.headers || {});
+    return fetch(url, opts);
+}
+
+// ── Toast ─────────────────────────────────────────────────
+function showToast(msg, type = 'success') {
+    const t = document.getElementById('toast');
+    t.textContent = msg;
+    t.className = 'toast ' + type + ' show';
+    clearTimeout(t._tid);
+    t._tid = setTimeout(() => t.classList.remove('show'), 3000);
+}
+
 // ── State ─────────────────────────────────────────────────
 let currentSessionId = null;
 
@@ -606,7 +639,7 @@ function showChatPage() {
 // ── Sessions ──────────────────────────────────────────────
 async function loadSessions() {
     try {
-        const data = await fetch('/api/sessions').then(r => r.json());
+        const data = await api('/api/sessions').then(r => r.json());
         currentSessionId = data.current_session;
         const container = document.getElementById('session-list');
         if (!data.sessions || data.sessions.length === 0) {
@@ -624,6 +657,7 @@ async function loadSessions() {
                     <div class="session-title">${escapeHtml(displayTitle)}</div>
                     <div class="session-meta">${dateStr} · ${s.messages} msgs</div>
                     <div class="session-actions">
+                        <button class="session-action-btn" onclick="event.stopPropagation();exportSession('${s.session_id}')" title="Export">&#8615;</button>
                         <button class="session-action-btn delete" onclick="event.stopPropagation();deleteSession('${s.session_id}')" title="Delete">&#x2715;</button>
                     </div>
                 </div>`;
@@ -635,7 +669,7 @@ async function loadSessions() {
 
 async function newSession() {
     try {
-        const data = await fetch('/api/sessions/new', {method:'POST'}).then(r=>r.json());
+        const data = await api('/api/sessions/new', {method:'POST'}).then(r=>r.json());
         currentSessionId = data.session_id;
         document.getElementById('chat-messages').innerHTML = `
             <div class="message assistant"><div class="avatar">&#129302;</div>
@@ -647,10 +681,9 @@ async function newSession() {
 
 async function loadSession(sessionId) {
     try {
-        const data = await fetch(`/api/sessions/${sessionId}/load`, {method:'POST'}).then(r=>r.json());
+        const data = await api(`/api/sessions/${sessionId}/load`, {method:'POST'}).then(r=>r.json());
         if (data.error) return;
         currentSessionId = data.session_id;
-        // Render messages
         const container = document.getElementById('chat-messages');
         container.innerHTML = '';
         for (const m of data.messages) {
@@ -665,9 +698,13 @@ async function loadSession(sessionId) {
 
 async function deleteSession(sessionId) {
     if (!confirm('Delete this conversation?')) return;
-    await fetch(`/api/sessions/${sessionId}`, {method:'DELETE'});
+    await api(`/api/sessions/${sessionId}`, {method:'DELETE'});
     if (sessionId === currentSessionId) await newSession();
     else loadSessions();
+}
+
+function exportSession(sessionId) {
+    window.open(`/api/sessions/${sessionId}/export`, '_blank');
 }
 
 // ── Chat ──────────────────────────────────────────────────
@@ -689,23 +726,24 @@ async function sendMessage() {
         const body = {message: msg};
         if (cloudModel !== 'auto') body.cloud_model = cloudModel;
 
-        const res = await fetch('/api/chat', {
+        const res = await api('/api/chat', {
             method: 'POST',
-            headers: {'Content-Type': 'application/json'},
             body: JSON.stringify(body)
         });
+        if (res.status === 429) {
+            addMessage('assistant', 'Rate limit reached. Please wait a moment before sending another message.');
+            proc.classList.remove('active'); input.disabled = false; input.focus(); return;
+        }
         const data = await res.json();
 
         let meta = data.model || '';
         if (data.cloud_model) meta = data.cloud_model;
         if (data.response_time) meta += ` · ${data.response_time}s`;
 
-        addMessage('assistant', data.response, meta, data.response_time);
+        addMessage('assistant', data.response || data.error, meta, data.response_time);
 
-        // Update balances
         if (data.balances) updateBalanceDisplay(data.balances);
-
-        // Refresh session list (title may have been set)
+        if (data.history_truncated) showToast('Older messages trimmed to keep context manageable', 'warn');
         loadSessions();
     } catch(e) {
         addMessage('assistant', 'Error: Could not reach the server.');
@@ -743,7 +781,7 @@ function escapeHtml(s) {
 // ── Cloud Model Selector ──────────────────────────────────
 async function loadCloudModels() {
     try {
-        const data = await fetch('/api/cloud/models').then(r=>r.json());
+        const data = await api('/api/cloud/models').then(r=>r.json());
         const sel = document.getElementById('cloud-model-selector');
         let html = '<option value="auto">Auto (smart routing)</option>';
 
@@ -769,9 +807,8 @@ async function loadCloudModels() {
 }
 
 async function setCloudModel(modelId) {
-    await fetch('/api/cloud/model', {
+    await api('/api/cloud/model', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({model: modelId})
     });
 }
@@ -779,7 +816,7 @@ async function setCloudModel(modelId) {
 // ── Balances ──────────────────────────────────────────────
 async function loadBalances() {
     try {
-        const data = await fetch('/api/cloud/balances').then(r=>r.json());
+        const data = await api('/api/cloud/balances').then(r=>r.json());
         updateBalanceDisplay(data.balances);
     } catch(e) {}
 }
@@ -800,26 +837,28 @@ function updateBalanceDisplay(balances) {
 }
 
 async function saveBalances() {
-    const a = parseFloat(document.getElementById('setting-bal-anthropic').value) || 0;
-    const o = parseFloat(document.getElementById('setting-bal-openai').value) || 0;
-    const data = await fetch('/api/cloud/balances', {
+    const a = Math.max(0, parseFloat(document.getElementById('setting-bal-anthropic').value) || 0);
+    const o = Math.max(0, parseFloat(document.getElementById('setting-bal-openai').value) || 0);
+    document.getElementById('setting-bal-anthropic').value = a.toFixed(2);
+    document.getElementById('setting-bal-openai').value = o.toFixed(2);
+    const data = await api('/api/cloud/balances', {
         method: 'POST',
-        headers: {'Content-Type': 'application/json'},
         body: JSON.stringify({anthropic: a, openai: o})
     }).then(r=>r.json());
     if (data.balances) updateBalanceDisplay(data.balances);
+    showToast('Balances updated');
 }
 
 // ── Mode ──────────────────────────────────────────────────
 async function setMode(mode) {
-    try { await fetch('/api/mode', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({mode})}); } catch(e) {}
+    try { await api('/api/mode', {method:'POST', body:JSON.stringify({mode})}); } catch(e) {}
 }
 
 // ── Models page ───────────────────────────────────────────
 async function loadModels() {
     const [installed, available] = await Promise.all([
-        fetch('/api/models').then(r=>r.json()),
-        fetch('/api/models/available').then(r=>r.json())
+        api('/api/models').then(r=>r.json()),
+        api('/api/models/available').then(r=>r.json())
     ]);
 
     const container = document.getElementById('installed-models');
@@ -869,7 +908,7 @@ async function pullModel(name) {
     const progress = document.getElementById('pull-progress');
     progress.style.display = 'block';
     progress.textContent = `Downloading ${name}...`;
-    const res = await fetch('/api/models/pull', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:name})});
+    const res = await api('/api/models/pull', {method:'POST', body:JSON.stringify({model:name})});
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     while(true) {
@@ -888,12 +927,12 @@ async function pullModel(name) {
 
 async function deleteModel(name) {
     if (!confirm(`Delete ${name}?`)) return;
-    await fetch('/api/models/delete', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({model:name})});
+    await api('/api/models/delete', {method:'POST', body:JSON.stringify({model:name})});
     loadModels();
 }
 
 async function setModel(role, name) {
-    await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({llm:{[role+'_model']:name}})});
+    await api('/api/config', {method:'POST', body:JSON.stringify({llm:{[role+'_model']:name}})});
     loadModels();
 }
 
@@ -907,7 +946,7 @@ function updateModelSelects(models) {
 
 // ── Tools ─────────────────────────────────────────────────
 async function loadTools() {
-    const tools = await fetch('/api/tools').then(r=>r.json());
+    const tools = await api('/api/tools').then(r=>r.json());
     const descs = {
         file_manager:'Read, write, search, organize files', web_search:'Search internet, fetch pages',
         desktop_control:'Launch apps, windows, clipboard, commands', system_info:'CPU, RAM, GPU stats',
@@ -923,12 +962,13 @@ async function loadTools() {
 }
 
 async function toggleTool(name, enabled) {
-    await fetch('/api/tools/toggle', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({tool:name,enabled})});
+    await api('/api/tools/toggle', {method:'POST', body:JSON.stringify({tool:name,enabled})});
+    showToast(enabled ? `${name} enabled` : `${name} disabled`);
 }
 
 // ── Settings ──────────────────────────────────────────────
 async function loadSettings() {
-    const cfg = await fetch('/api/config').then(r=>r.json());
+    const cfg = await api('/api/config').then(r=>r.json());
     document.getElementById('setting-temp').value = cfg.llm?.temperature ?? 0.3;
     document.getElementById('setting-ctx').value = cfg.llm?.context_window ?? 8192;
     document.getElementById('setting-searxng').value = cfg.search?.searxng_url ?? '';
@@ -953,13 +993,13 @@ async function loadSettings() {
 
     // Model selects
     try {
-        const models = await fetch('/api/models').then(r=>r.json());
+        const models = await api('/api/models').then(r=>r.json());
         if (models.models) updateModelSelects(models.models);
     } catch(e) {}
 
     // Balances in settings
     try {
-        const bal = await fetch('/api/cloud/balances').then(r=>r.json());
+        const bal = await api('/api/cloud/balances').then(r=>r.json());
         document.getElementById('setting-bal-anthropic').value = (bal.balances?.anthropic || 0).toFixed(2);
         document.getElementById('setting-bal-openai').value = (bal.balances?.openai || 0).toFixed(2);
     } catch(e) {}
@@ -970,7 +1010,8 @@ async function saveSettings() {
         llm: { primary_model: document.getElementById('setting-primary-model').value, temperature: parseFloat(document.getElementById('setting-temp').value), context_window: parseInt(document.getElementById('setting-ctx').value) },
         search: { searxng_url: document.getElementById('setting-searxng').value, max_results: parseInt(document.getElementById('setting-search-results').value) }
     };
-    await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg)});
+    const res = await api('/api/config', {method:'POST', body:JSON.stringify(cfg)});
+    showToast(res.ok ? 'Settings saved' : 'Failed to save', res.ok ? 'success' : 'error');
 }
 
 async function saveCloudSettings() {
@@ -981,7 +1022,8 @@ async function saveCloudSettings() {
             provider: document.getElementById('setting-cloud-provider').value,
         }
     };
-    await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(cfg)});
+    const res = await api('/api/config', {method:'POST', body:JSON.stringify(cfg)});
+    showToast(res.ok ? 'Cloud settings saved' : 'Failed to save', res.ok ? 'success' : 'error');
 }
 
 async function saveFeatureToggles() {
@@ -991,13 +1033,14 @@ async function saveFeatureToggles() {
         strict_legal_mode: document.getElementById('toggle-strict-legal').checked,
         allow_external_downloads: document.getElementById('toggle-external-downloads').checked,
     };
-    await fetch('/api/config', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({features})});
+    const res = await api('/api/config', {method:'POST', body:JSON.stringify({features})});
+    showToast(res.ok ? 'Feature toggles saved' : 'Failed to save', res.ok ? 'success' : 'error');
 }
 
 // ── Knowledge Base ────────────────────────────────────────
 async function loadKnowledgeStats() {
     try {
-        const stats = await fetch('/api/knowledge/stats').then(r=>r.json());
+        const stats = await api('/api/knowledge/stats').then(r=>r.json());
         document.getElementById('kb-stats').innerHTML = `
             <h3>Database Stats</h3>
             <div class="setting-row"><div class="setting-label">Files Indexed</div><div style="font-family:var(--font-mono);color:var(--accent)">${stats.total_files}</div></div>
@@ -1009,7 +1052,7 @@ async function loadKnowledgeStats() {
 // ── Legal Files ───────────────────────────────────────────
 async function loadLegalFiles() {
     try {
-        const data = await fetch('/api/legal/files').then(r=>r.json());
+        const data = await api('/api/legal/files').then(r=>r.json());
         const container = document.getElementById('legal-files');
         if (Object.keys(data.categories).length === 0) {
             container.innerHTML = '<div class="card"><div style="color:var(--text-dim);text-align:center;padding:20px;">No files yet</div></div>';
@@ -1025,7 +1068,7 @@ async function loadLegalFiles() {
 // ── System Stats ──────────────────────────────────────────
 async function updateSystemStats() {
     try {
-        const info = await fetch('/api/system').then(r=>r.json());
+        const info = await api('/api/system').then(r=>r.json());
         const setBar = (id, pct) => {
             const bar = document.getElementById(id);
             bar.style.width = pct + '%';
@@ -1052,7 +1095,7 @@ setInterval(updateSystemStats, 5000);
 setInterval(loadBalances, 30000);
 
 // Load current mode
-fetch('/api/mode').then(r=>r.json()).then(d => { if(d.mode) document.getElementById('mode-selector').value = d.mode; }).catch(()=>{});
+api('/api/mode').then(r=>r.json()).then(d => { if(d.mode) document.getElementById('mode-selector').value = d.mode; }).catch(()=>{});
 </script>
 </body>
 </html>

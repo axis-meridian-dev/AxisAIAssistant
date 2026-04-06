@@ -26,6 +26,7 @@ PyMuPDF
 
 # Web dashboard
 flask
+flask-limiter
 
 # Cloud providers
 anthropic

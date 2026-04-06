@@ -234,7 +234,7 @@ class Agent:
         self.cloud = CloudReasoner(config)
         
         # Initialize tools
-        self.tool_instances = {
+        self._all_tool_instances = {
             "file_manager": FileManagerTool(config),
             "web_search": WebSearchTool(config),
             "desktop_control": DesktopControlTool(config),
@@ -243,15 +243,28 @@ class Agent:
             "legal_research": LegalResearchTool(config),
             "document_writer": DocumentWriterTool(config),
         }
-        
+        self.tool_instances = dict(self._all_tool_instances)
+
+        # Apply tool toggles from config
+        self.apply_tool_toggles(config.get("enabled_tools", {}))
+    
+    def apply_tool_toggles(self, enabled_tools: dict):
+        """Rebuild active tools based on enabled_tools config."""
+        self.tool_instances = {
+            name: inst for name, inst in self._all_tool_instances.items()
+            if enabled_tools.get(name, True)
+        }
+        self._rebuild_tool_index()
+
+    def _rebuild_tool_index(self):
+        """Rebuild tool definitions and handler lookup from active instances."""
         self.tools = []
         for instance in self.tool_instances.values():
             self.tools.extend(instance.get_tool_definitions())
-        
         self.tool_handlers = {}
         for instance in self.tool_instances.values():
             self.tool_handlers.update(instance.get_handlers())
-    
+
     def list_tools(self) -> list[str]:
         return list(self.tool_instances.keys())
     
@@ -437,6 +450,9 @@ class Agent:
 
                 if len(self.history) > 40:
                     self.history = self.history[-30:]
+                    self._history_truncated = True
+                else:
+                    self._history_truncated = False
 
                 return final
         
