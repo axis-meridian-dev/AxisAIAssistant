@@ -22,7 +22,7 @@ import ollama
 from agent import Agent
 from config import load_config
 
-app = Flask(__name__)
+app = Flask(__name__, template_folder="templates")
 
 # ── Global state ────────────────────────────────────────────────────────────
 
@@ -42,7 +42,7 @@ def get_agent():
 
 @app.route("/")
 def index():
-    return send_file("dashboard.html")
+    return send_file("templates/dashboard.html")
 
 
 @app.route("/api/chat", methods=["POST"])

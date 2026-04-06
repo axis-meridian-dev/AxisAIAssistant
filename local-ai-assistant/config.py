@@ -111,7 +111,7 @@ def _inject_env_secrets(config: dict) -> dict:
     cloud.setdefault("openai_model", "gpt-4o")
     cloud.setdefault("enabled", True)
     cloud.setdefault("auto_route", True)
-    cloud.setdefault("max_monthly_budget", 40.0)
+    cloud.setdefault("max_monthly_budget", 60.0)
     cloud.setdefault("monthly_spend", 0.0)
 
     return config

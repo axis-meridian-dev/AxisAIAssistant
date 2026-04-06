@@ -1,0 +1,39 @@
+# Core
+ollama
+httpx
+rich
+pydantic
+python-dotenv
+
+# Web search
+duckduckgo-search
+readability-lxml
+beautifulsoup4
+lxml
+
+# Desktop control
+pynput
+pyperclip
+python-xlib
+
+# System
+psutil
+watchdog
+
+# Knowledge base
+chromadb
+PyMuPDF
+
+# Web dashboard
+flask
+
+# Cloud providers
+anthropic
+openai
+
+# Voice (optional — install separately if needed)
+# faster-whisper
+# piper-tts
+# openwakeword
+# sounddevice
+# numpy
