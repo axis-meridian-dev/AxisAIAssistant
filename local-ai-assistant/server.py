@@ -1,5 +1,3 @@
-from config_utils import save_config_safe
-from config_utils import save_config_safe
 #!/usr/bin/env python3
 """
 Local AI Assistant — Web Dashboard Server
@@ -21,8 +19,20 @@ import ollama
 
 from agent import Agent
 from config import load_config
+from config_utils import save_config_safe
+from stats import InquiryStats
 
 app = Flask(__name__)
+
+
+# ── CORS middleware ────────────────────────────────────────────────────────
+@app.after_request
+def add_cors_headers(response):
+    """Allow LAN access for multi-device usage."""
+    response.headers["Access-Control-Allow-Origin"] = "*"
+    response.headers["Access-Control-Allow-Headers"] = "Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, DELETE, OPTIONS"
+    return response
 
 # ── Global state ────────────────────────────────────────────────────────────
 
@@ -68,6 +78,19 @@ def chat():
             loop.close()
 
     elapsed = _time.time() - start
+
+    # Track inquiry stats in server mode
+    try:
+        inquiry = InquiryStats(
+            query=message,
+            model=config["llm"]["primary_model"],
+            total_time=elapsed,
+            response_chars=len(response),
+            timestamp=datetime.now().isoformat(),
+        )
+        a.session_stats.record_inquiry(inquiry)
+    except Exception:
+        pass
 
     return jsonify({
         "response": response,
@@ -181,11 +204,8 @@ def update_config():
         else:
             config[section] = values
     
-    # Save to disk
-    config_path = Path(__file__).parent / "config" / "settings.json"
-    config_path.parent.mkdir(exist_ok=True)
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=4)
+    # Save to disk (strips API keys)
+    save_config_safe(config)
     
     # Reload agent
     with agent_lock:
@@ -256,10 +276,8 @@ def toggle_tool():
         config["enabled_tools"] = {}
     config["enabled_tools"][tool_name] = enabled
     
-    # Save config
-    config_path = Path(__file__).parent / "config" / "settings.json"
-    with open(config_path, "w") as f:
-        json.dump(config, f, indent=4)
+    # Save config (strips API keys)
+    save_config_safe(config)
     
     # Reload agent
     with agent_lock:
@@ -435,12 +453,8 @@ def update_cloud_config():
         if key in data and "..." not in data[key] and data[key] != "***set***":
             config["cloud"][key] = data[key]
     
-    # Save config
-    config_path = Path(__file__).parent / "config" / "settings.json"
-    config_path.parent.mkdir(exist_ok=True)
-    import json as j
-    with open(config_path, "w") as f:
-        j.dump(config, f, indent=4)
+    # Save config (strips API keys)
+    save_config_safe(config)
     
     # Reload agent
     with agent_lock:
@@ -453,119 +467,110 @@ def update_cloud_config():
 
 @app.route("/api/chat/cloud", methods=["POST"])
 def chat_cloud():
-    """Send a message directly to Claude API (bypasses Ollama entirely)."""
+    """Send a message directly to cloud LLM — delegates to CloudReasoner."""
     data = request.json
     message = data.get("message", "")
     history = data.get("history", [])
-    
+
     if not message.strip():
         return jsonify({"error": "Empty message"}), 400
-    
+
     cloud_cfg = config.get("cloud", {})
     if not cloud_cfg.get("enabled"):
-        return jsonify({"error": "Cloud not enabled. Enable in Settings.", "response": "Cloud mode is not enabled. Go to Settings > Cloud Reasoning and enable it."}), 200
-    
-    api_key = cloud_cfg.get("anthropic_api_key", "")
-    if not api_key:
-        return jsonify({"error": "No API key", "response": "No Anthropic API key configured. Add it to config/settings.json"}), 200
-    
+        return jsonify({"error": "Cloud not enabled", "response": "Cloud mode is not enabled. Go to Settings > Cloud Reasoning and enable it."}), 200
+
     try:
-        import anthropic
-        client = anthropic.Anthropic(api_key=api_key)
-        model = cloud_cfg.get("anthropic_model", "claude-sonnet-4-20250514")
-        
-        # Build messages
+        from cloud_reasoning import CloudReasoner
+        cr = CloudReasoner(config)
+
+        model = cr.select_model(message, "legal", "analysis")
+
+        # Build messages for CloudReasoner
         api_messages = []
-        for msg in history[-20:]:  # Last 20 messages for context
+        for msg in history[-20:]:
             if msg.get("role") in ("user", "assistant"):
                 api_messages.append({"role": msg["role"], "content": msg["content"]})
         api_messages.append({"role": "user", "content": message})
-        
-        # Ensure alternating roles
-        cleaned = []
-        for msg in api_messages:
-            if cleaned and cleaned[-1]["role"] == msg["role"]:
-                cleaned[-1]["content"] += "\n\n" + msg["content"]
-            else:
-                cleaned.append(msg)
-        if cleaned and cleaned[0]["role"] != "user":
-            cleaned.insert(0, {"role": "user", "content": "(continuing)"})
-        
-        system_prompt = """You are a legal research assistant for a defendant in Connecticut with active court cases.
-You have access to a local knowledge base of 430+ legal files including CT General Statutes, federal statutes, 
-case law, international human rights instruments, and crime statistics.
 
-The user is Jonathan Sewell, a US Army National Guard infantry veteran (Bravo Company, 1/102nd, Middletown CT) 
-with a registered PTSD service dog. He has active cases in Rockville Superior Court stemming from a 
-August 27, 2024 incident in Mansfield, CT. He has a 15+ year history of encounters with CT law enforcement 
-across multiple departments that he believes constitute a pattern of civil rights violations.
+        a = get_agent()
+        system_prompt = a.system_prompt if hasattr(a, "system_prompt") else ""
 
-RULES:
-1. Always cite specific statutes (CGS sections, USC sections) and case law with full citations
-2. Be direct, thorough, and adversarial on behalf of the defendant
-3. Reference CT-specific law including Article I § 7 (broader than 4th Amendment) and PA 20-1 (Police Accountability Act)
-4. When discussing his cases, identify every weakness in the state's case
-5. End legal responses with confidence scoring
-6. This is legal research, not legal advice — include disclaimer when producing formal analysis
+        result = cr.query(api_messages, system_prompt, model=model)
+        if result is None:
+            return jsonify({"response": "Cloud query failed — check API keys.", "model": "error"})
 
-Be direct. No filler. The user is intelligent and capable — he built this entire AI system himself."""
-
-        response = client.messages.create(
-            model=model,
-            max_tokens=8192,
-            system=system_prompt,
-            messages=cleaned,
-        )
-        
-        result = ""
-        for block in response.content:
-            if hasattr(block, "text"):
-                result += block.text
-        
-        # Track cost
-        input_tokens = response.usage.input_tokens
-        output_tokens = response.usage.output_tokens
-        
-        pricing = {
-            "claude-opus-4-6": {"input": 5.0, "output": 25.0},
-            "claude-sonnet-4-20250514": {"input": 3.0, "output": 15.0},
-            "claude-haiku-4-5-20251001": {"input": 0.80, "output": 4.0},
-        }
-        rates = pricing.get(model, {"input": 5.0, "output": 25.0})
-        cost = (input_tokens / 1_000_000 * rates["input"] + 
-                output_tokens / 1_000_000 * rates["output"])
-        
-        # Update spend tracker
-        import json as j
-        spend_file = Path.home() / ".local" / "share" / "ai-assistant" / "cloud_spend.json"
-        spend_file.parent.mkdir(parents=True, exist_ok=True)
-        spend_data = {"month": "", "spend": 0}
-        if spend_file.exists():
-            with open(spend_file) as f:
-                spend_data = j.load(f)
-        
-        from datetime import datetime as dt
-        current_month = dt.now().strftime("%Y-%m")
-        if spend_data.get("month") != current_month:
-            spend_data = {"month": current_month, "spend": 0}
-        spend_data["spend"] = round(spend_data["spend"] + cost, 4)
-        spend_data["updated"] = dt.now().isoformat()
-        with open(spend_file, "w") as f:
-            j.dump(spend_data, f, indent=2)
-        
         return jsonify({
             "response": result,
             "model": model,
-            "cost": round(cost, 4),
-            "monthly_spend": spend_data["spend"],
-            "tokens": {"input": input_tokens, "output": output_tokens},
-            "timestamp": dt.now().isoformat()
+            "cost": round(cr.monthly_spend, 4),
+            "monthly_spend": cr.monthly_spend,
+            "timestamp": datetime.now().isoformat(),
         })
-        
+
     except ImportError:
-        return jsonify({"response": "Error: pip install anthropic", "model": "error"})
+        return jsonify({"response": "Error: pip install anthropic openai", "model": "error"})
     except Exception as e:
         return jsonify({"response": f"Cloud error: {e}", "model": "error"})
+
+
+@app.route("/api/chat/stream", methods=["POST"])
+def chat_stream():
+    """SSE streaming endpoint for chat — streams tokens as they arrive."""
+    data = request.json
+    message = data.get("message", "")
+
+    if not message.strip():
+        return jsonify({"error": "Empty message"}), 400
+
+    def generate():
+        import time as _time
+        start = _time.time()
+
+        with agent_lock:
+            a = get_agent()
+            loop = asyncio.new_event_loop()
+            try:
+                response = loop.run_until_complete(a.process(message))
+            except Exception as e:
+                response = f"Error: {e}"
+            finally:
+                loop.close()
+
+        elapsed = _time.time() - start
+
+        # Track inquiry stats in server mode
+        try:
+            inquiry = InquiryStats(
+                query=message,
+                model=config["llm"]["primary_model"],
+                total_time=elapsed,
+                response_chars=len(response),
+                timestamp=datetime.now().isoformat(),
+            )
+            a.session_stats.record_inquiry(inquiry)
+        except Exception:
+            pass
+
+        # Send full response as a single SSE event
+        yield f"data: {json.dumps({'token': response, 'done': False})}\n\n"
+        yield f"data: {json.dumps({'done': True, 'model': config['llm']['primary_model'], 'response_time': round(elapsed, 2)})}\n\n"
+
+    return Response(generate(), mimetype="text/event-stream")
+
+
+@app.route("/api/stats", methods=["GET"])
+def get_stats():
+    """Get session and inquiry statistics."""
+    a = get_agent()
+    try:
+        return jsonify({
+            "session_summary": a.session_stats.format_session_summary(),
+            "model_stats": a.session_stats.model_stats,
+            "inquiry_count": len(a.session_stats.inquiries),
+            "available": True,
+        })
+    except Exception:
+        return jsonify({"available": False})
 
 
 # ── Run ─────────────────────────────────────────────────────────────────────

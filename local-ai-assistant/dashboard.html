@@ -571,15 +571,106 @@ body {
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
 
+/* ── Textarea auto-resize ──────────────────────────────── */
+textarea.chat-input {
+    resize: none;
+    min-height: 44px;
+    max-height: 160px;
+    overflow-y: auto;
+    line-height: 1.5;
+}
+
+/* ── Toast notifications ──────────────────────────────── */
+.toast-container {
+    position: fixed;
+    top: 16px;
+    right: 16px;
+    z-index: 9999;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    pointer-events: none;
+}
+
+.toast {
+    background: var(--bg-secondary);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 12px 20px;
+    font-size: 13px;
+    color: var(--text-primary);
+    box-shadow: 0 4px 24px rgba(0,0,0,0.4);
+    pointer-events: auto;
+    animation: toastIn 0.25s ease;
+    max-width: 380px;
+}
+
+.toast.error { border-color: var(--red); color: var(--red); }
+.toast.success { border-color: var(--green); color: var(--green); }
+.toast.info { border-color: var(--accent); color: var(--accent); }
+
+.toast.hiding { animation: toastOut 0.2s ease forwards; }
+
+@keyframes toastIn { from { opacity: 0; transform: translateY(-12px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes toastOut { to { opacity: 0; transform: translateY(-12px); } }
+
+/* ── Markdown rendering ───────────────────────────────── */
+.message .content h1, .message .content h2, .message .content h3 {
+    margin: 12px 0 6px;
+    font-weight: 700;
+    color: var(--text-primary);
+}
+.message .content h1 { font-size: 18px; }
+.message .content h2 { font-size: 16px; }
+.message .content h3 { font-size: 14px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--text-secondary); }
+
+.message .content ul, .message .content ol {
+    margin: 6px 0;
+    padding-left: 20px;
+}
+.message .content li { margin-bottom: 4px; }
+
+.message .content blockquote {
+    border-left: 3px solid var(--accent);
+    padding-left: 12px;
+    margin: 8px 0;
+    color: var(--text-secondary);
+    font-style: italic;
+}
+
+.message .content hr {
+    border: none;
+    border-top: 1px solid var(--border);
+    margin: 12px 0;
+}
+
+.message .content a {
+    color: var(--accent);
+    text-decoration: underline;
+    text-underline-offset: 2px;
+}
+
 /* ── Responsive ─────────────────────────────────────────── */
 @media (max-width: 768px) {
     .sidebar { width: 60px; min-width: 60px; }
     .sidebar-header h1 span, .sidebar-header .subtitle, .nav-item span:not(.icon), .nav-section, .sys-stats { display: none; }
     .nav-item { justify-content: center; padding: 12px; }
+    .chat-header { flex-wrap: wrap; gap: 8px; padding: 12px 16px; }
+    .chat-messages { padding: 16px; }
+    .chat-input-area { padding: 12px 16px 16px; }
+    .setting-row { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .setting-input { width: 100%; text-align: left; }
+    .model-row { flex-direction: column; align-items: flex-start; gap: 8px; }
+    .model-actions { width: 100%; }
+    .page-header { padding: 16px; }
+    .page-content { padding: 16px; }
 }
 </style>
 </head>
 <body>
+
+<!-- Toast notifications -->
+<div class="toast-container" id="toast-container"></div>
 
 <!-- Sidebar -->
 <div class="sidebar">
@@ -663,9 +754,9 @@ body {
                 <span id="processing-text">Processing...</span>
             </div>
             <div class="chat-input-wrapper">
-                <input type="text" class="chat-input" id="chat-input" 
-                       placeholder="Type a message..." 
-                       onkeydown="if(event.key==='Enter')sendMessage()">
+                <textarea class="chat-input" id="chat-input" rows="1"
+                       placeholder="Type a message... (Shift+Enter for new line)" 
+                       onkeydown="if(event.key==='Enter'&&!event.shiftKey){event.preventDefault();sendMessage();}chatInputAutoResize(this);"></textarea>
                 <button class="btn btn-primary" onclick="sendMessage()">Send</button>
             </div>
         </div>
@@ -817,7 +908,7 @@ body {
                     <input type="number" class="setting-input" id="setting-search-results" 
                            min="1" max="20" value="5" onchange="saveSettings()">
                 </div>
-            
+            </div>
 
             <div class="card">
                 <h3>☁️ Cloud Reasoning (Hybrid Mode)</h3>
@@ -924,6 +1015,74 @@ body {
 </div>
 
 <script>
+// ── Toast System ──────────────────────────────────────────
+function showToast(message, type = 'info', duration = 4000) {
+    const container = document.getElementById('toast-container');
+    const toast = document.createElement('div');
+    toast.className = `toast ${type}`;
+    toast.textContent = message;
+    container.appendChild(toast);
+    setTimeout(() => {
+        toast.classList.add('hiding');
+        setTimeout(() => toast.remove(), 200);
+    }, duration);
+}
+
+// ── Textarea Auto-resize ──────────────────────────────────
+function chatInputAutoResize(el) {
+    el.style.height = 'auto';
+    el.style.height = Math.min(el.scrollHeight, 160) + 'px';
+}
+
+// ── Markdown Renderer ─────────────────────────────────────
+function renderMarkdown(text) {
+    // Escape HTML first
+    let html = text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+    // Fenced code blocks
+    html = html.replace(/```(\w*)\n?([\s\S]*?)```/g, (_, lang, code) => {
+        return `<pre><code class="lang-${lang}">${code.trim()}</code></pre>`;
+    });
+
+    // Inline code
+    html = html.replace(/`([^`]+)`/g, '<code>$1</code>');
+
+    // Headers
+    html = html.replace(/^### (.+)$/gm, '<h3>$1</h3>');
+    html = html.replace(/^## (.+)$/gm, '<h2>$1</h2>');
+    html = html.replace(/^# (.+)$/gm, '<h1>$1</h1>');
+
+    // Bold and italic
+    html = html.replace(/\*\*\*(.+?)\*\*\*/g, '<strong><em>$1</em></strong>');
+    html = html.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
+    html = html.replace(/\*(.+?)\*/g, '<em>$1</em>');
+
+    // Blockquotes
+    html = html.replace(/^&gt; (.+)$/gm, '<blockquote>$1</blockquote>');
+
+    // Horizontal rules
+    html = html.replace(/^---$/gm, '<hr>');
+
+    // Unordered lists
+    html = html.replace(/^[\-\*] (.+)$/gm, '<li>$1</li>');
+    html = html.replace(/((?:<li>.*<\/li>\n?)+)/g, '<ul>$1</ul>');
+
+    // Ordered lists
+    html = html.replace(/^\d+\. (.+)$/gm, '<li>$1</li>');
+
+    // Links
+    html = html.replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<a href="$2" target="_blank" rel="noopener">$1</a>');
+
+    // Line breaks (but not inside block elements)
+    html = html.replace(/\n/g, '<br>');
+
+    // Clean up double <br> after block elements
+    html = html.replace(/<\/(h[123]|ul|ol|blockquote|pre|hr)><br>/g, '</$1>');
+    html = html.replace(/<br><(h[123]|ul|ol|blockquote|pre|hr)/g, '<$1');
+
+    return html;
+}
+
 // ── Navigation ─────────────────────────────────────────────
 document.querySelectorAll('.nav-item').forEach(item => {
     item.addEventListener('click', () => {
@@ -971,40 +1130,80 @@ async function sendMessage() {
     if (!msg) return;
     
     input.value = '';
+    input.style.height = 'auto';
     input.disabled = true;
     addMessage('user', msg);
     
     const proc = document.getElementById('processing');
     const procText = document.getElementById('processing-text');
     proc.classList.add('active');
-    procText.textContent = 'Sending to LLM...';
     
     try {
         let data;
         if (chatMode === 'cloud') {
-            procText.textContent = 'Sending to Claude API...';
+            procText.textContent = 'Sending to cloud API...';
             const res = await fetch('/api/chat/cloud', {
                 method: 'POST',
                 headers: {'Content-Type': 'application/json'},
                 body: JSON.stringify({message: msg, history: cloudHistory})
             });
+            if (!res.ok) throw new Error(`Server returned ${res.status}`);
             data = await res.json();
+            if (data.error && !data.response) throw new Error(data.error);
             cloudHistory.push({role: 'user', content: msg});
             cloudHistory.push({role: 'assistant', content: data.response});
             if (cloudHistory.length > 40) cloudHistory = cloudHistory.slice(-30);
             const costInfo = data.cost ? ' · $' + data.cost.toFixed(4) : '';
             addMessage('assistant', data.response, (data.model || 'cloud') + costInfo, null);
         } else {
-            const res = await fetch('/api/chat', {
-                method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({message: msg})
-            });
-            data = await res.json();
-            addMessage('assistant', data.response, data.model, data.response_time);
+            procText.textContent = 'Processing with local LLM...';
+            // Try streaming endpoint first, fallback to regular
+            try {
+                const res = await fetch('/api/chat/stream', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message: msg})
+                });
+                if (!res.ok) throw new Error('stream-unavailable');
+                const reader = res.body.getReader();
+                const decoder = new TextDecoder();
+                let fullResponse = '';
+                let model = '';
+                let responseTime = null;
+                
+                while (true) {
+                    const {done, value} = await reader.read();
+                    if (done) break;
+                    const text = decoder.decode(value);
+                    const lines = text.split('\n').filter(l => l.startsWith('data: '));
+                    for (const line of lines) {
+                        try {
+                            const evt = JSON.parse(line.slice(6));
+                            if (evt.token) fullResponse += evt.token;
+                            if (evt.done) {
+                                model = evt.model || '';
+                                responseTime = evt.response_time || null;
+                            }
+                        } catch(e) {}
+                    }
+                }
+                addMessage('assistant', fullResponse, model, responseTime);
+            } catch(streamErr) {
+                // Fallback to regular endpoint
+                const res = await fetch('/api/chat', {
+                    method: 'POST',
+                    headers: {'Content-Type': 'application/json'},
+                    body: JSON.stringify({message: msg})
+                });
+                if (!res.ok) throw new Error(`Server returned ${res.status}`);
+                data = await res.json();
+                addMessage('assistant', data.response, data.model, data.response_time);
+            }
         }
     } catch(e) {
-        addMessage('assistant', 'Error: Could not reach the server. Is server.py running?');
+        const errMsg = e.message || 'Could not reach the server';
+        addMessage('assistant', `Error: ${errMsg}. Is server.py running?`);
+        showToast(errMsg, 'error');
     }
     
     proc.classList.remove('active');
@@ -1017,25 +1216,22 @@ function addMessage(role, content, model, responseTime) {
     const div = document.createElement('div');
     div.className = `message ${role}`;
 
-    const avatar = role === 'user' ? '👤' : '🤖';
-    const escaped = content
-        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-        .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
-        .replace(/`([^`]+)`/g, '<code>$1</code>')
-        .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-        .replace(/\n/g, '<br>');
+    const avatar = role === 'user' ? '&#128100;' : '&#129302;';
+    const rendered = role === 'user' 
+        ? content.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g, '<br>')
+        : renderMarkdown(content);
 
     let meta = '';
     if (model || responseTime != null) {
         const parts = [];
         if (model) parts.push(model);
         if (responseTime != null) parts.push(`<span class="response-time">${responseTime}s</span>`);
-        meta = `<div class="meta">${parts.join(' · ')}</div>`;
+        meta = `<div class="meta">${parts.join(' &middot; ')}</div>`;
     }
 
     div.innerHTML = `
         <div class="avatar">${avatar}</div>
-        <div class="content">${escaped}${meta}</div>
+        <div class="content">${rendered}${meta}</div>
     `;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
@@ -1206,11 +1402,16 @@ async function loadTools() {
 }
 
 async function toggleTool(name, enabled) {
-    await fetch('/api/tools/toggle', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({tool: name, enabled})
-    });
+    try {
+        await fetch('/api/tools/toggle', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify({tool: name, enabled})
+        });
+        showToast(`${name.replace(/_/g,' ')} ${enabled ? 'enabled' : 'disabled'}`, 'success', 2000);
+    } catch(e) {
+        showToast('Failed to toggle tool', 'error');
+    }
 }
 
 // ── Mode Selector ─────────────────────────────────────────
@@ -1282,13 +1483,17 @@ async function saveSettings() {
         }
     };
 
-    await fetch('/api/config', {
-        method: 'POST',
-        headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify(cfg)
-    });
-
-    document.getElementById('active-model').textContent = cfg.llm.primary_model;
+    try {
+        await fetch('/api/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(cfg)
+        });
+        document.getElementById('active-model').textContent = cfg.llm.primary_model;
+        showToast('Settings saved', 'success', 2000);
+    } catch(e) {
+        showToast('Failed to save settings', 'error');
+    }
 }
 
 async function saveFeatureToggles() {
@@ -1451,12 +1656,9 @@ async function viewSession(sessionId) {
         let lastUserMsg = '';
         for (const m of data.messages) {
             const avatar = m.role === 'user' ? '👤' : '🤖';
-            const escaped = (m.content || '')
-                .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
-                .replace(/```([\s\S]*?)```/g, '<pre>$1</pre>')
-                .replace(/`([^`]+)`/g, '<code>$1</code>')
-                .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
-                .replace(/\n/g, '<br>');
+            const escaped = m.role === 'user'
+                ? (m.content || '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>')
+                : renderMarkdown(m.content || '');
             let meta = '';
             if (m.role === 'user') {
                 lastUserMsg = m.content || '';
