@@ -59,6 +59,7 @@
         "openai_model": "gpt-4o",
         "enabled": true,
         "auto_route": true,
+        "cloud_first": true,
         "max_monthly_budget": 40.0,
         "monthly_spend": 0.0
     }

@@ -24,6 +24,7 @@ Setup:
 import json
 import logging
 import os
+import socket
 import time
 from datetime import datetime
 from pathlib import Path
@@ -194,16 +195,45 @@ ROUTE_PRESETS = {
 }
 
 
+def check_network(timeout: float = 2.0) -> bool:
+    """Check internet connectivity by attempting a socket connection.
+
+    Uses DNS resolution + TCP connect to a reliable host.
+    Cached for a short period to avoid repeated checks within a single query.
+    """
+    targets = [
+        ("8.8.8.8", 53),        # Google DNS
+        ("1.1.1.1", 53),        # Cloudflare DNS
+        ("208.67.222.222", 53), # OpenDNS
+    ]
+    for host, port in targets:
+        try:
+            sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            sock.settimeout(timeout)
+            sock.connect((host, port))
+            sock.close()
+            return True
+        except (OSError, socket.timeout):
+            continue
+    return False
+
+
 class CloudReasoner:
     """Multi-provider cloud LLM router with smart model selection."""
-    
+
     def __init__(self, config: dict):
         self.config = config
         self.cloud_cfg = config.get("cloud", {})
         self.enabled = self.cloud_cfg.get("enabled", False)
         self.provider = self.cloud_cfg.get("provider", "anthropic")
         self.auto_route = self.cloud_cfg.get("auto_route", True)
+        self.cloud_first = self.cloud_cfg.get("cloud_first", True)
         self.max_budget = self.cloud_cfg.get("max_monthly_budget", 40.0)
+
+        # Network state cache (avoid checking every call)
+        self._network_online = None
+        self._network_checked_at = 0.0
+        self._network_cache_ttl = 30.0  # re-check every 30 seconds
         
         # Default models per provider
         self.default_anthropic = self.cloud_cfg.get("anthropic_model", "claude-sonnet-4-20250514")
@@ -217,7 +247,18 @@ class CloudReasoner:
         # Lazy-load API clients
         self._anthropic = None
         self._openai = None
-    
+
+    @property
+    def is_online(self) -> bool:
+        """Check network connectivity with caching."""
+        now = time.time()
+        if self._network_online is None or (now - self._network_checked_at) > self._network_cache_ttl:
+            self._network_online = check_network()
+            self._network_checked_at = now
+            status = "ONLINE" if self._network_online else "OFFLINE"
+            logger.info("Network status: %s", status)
+        return self._network_online
+
     @property
     def anthropic_client(self):
         if self._anthropic is None:
@@ -391,44 +432,60 @@ class CloudReasoner:
         return self._first_affordable(FULL_CASCADE) or self.default_openai
     
     def should_use_cloud(self, query: str, intent: str, mode: str) -> bool:
-        """Decide if cloud should handle this query."""
+        """Decide if cloud should handle this query.
+
+        Routing priority (when cloud_first is enabled):
+          Online  → cloud for everything except pure file/desktop ops
+          Offline → local Ollama handles all queries
+        """
         if not self.enabled:
             return False
-        if not self.can_afford():
-            print(f"  [Cloud] Budget exceeded (${self.monthly_spend:.2f} / ${self.max_budget:.2f})", flush=True)
+
+        # ── Network check ────────────────────────────────────────────
+        online = self.is_online
+        if not online:
+            print("  [Cloud] Network offline → routing to LOCAL", flush=True)
             return False
-        
+
+        if not self.can_afford():
+            print(f"  [Cloud] Budget exceeded (${self.monthly_spend:.2f} / ${self.max_budget:.2f}) → LOCAL", flush=True)
+            return False
+
         lower = query.lower()
-        
-        # Never route file operations to cloud
+
+        # Never route file/desktop operations to cloud
         file_words = ["download", "list files", "search files", "ingest", "folder",
                       "directory", "copy file", "move file", "delete file", "open file",
                       "list_directory", "disk_usage"]
         if any(w in lower for w in file_words):
             return False
-        
-        # Explicit cloud request
+
+        # Explicit cloud request — always honor
         if any(p in lower for p in ["use cloud", "use claude", "use gpt", "cloud mode",
                                      "better model", "full power", "deep analysis",
                                      "use o3", "use reasoning", "use openai"]):
             return True
-        
-        # Auto-route enabled — send most things to cloud
+
+        # Explicit local request — honor it
+        if any(p in lower for p in ["use local", "use ollama", "offline mode"]):
+            return False
+
+        # ── Cloud-first mode: route everything to cloud when online ──
+        if self.cloud_first:
+            return True
+
+        # ── Legacy auto-route (cloud_first disabled) ─────────────────
         if self.auto_route:
-            # Legal queries always go cloud
             if intent in ("legal", "legal_adjacent"):
                 return True
-            # Document generation
             if any(p in lower for p in ["write", "draft", "create a document", "generate",
                                          "memorandum", "essay", "brief", "report"]):
                 return True
-            # Complex queries
             if any(p in lower for p in ["analyze", "compare", "explain", "research",
                                          "what are", "how does", "why did"]):
                 return True
-            # Simple stuff stays local
             return False
-        
+
         return False
     
     # ── Query Execution ─────────────────────────────────────────────────
@@ -618,9 +675,12 @@ class CloudReasoner:
         bal_o = self.provider_balances.get("openai", 0)
         spent_a = self.provider_spend.get("anthropic", 0)
         spent_o = self.provider_spend.get("openai", 0)
+        net = "ONLINE" if self.is_online else "OFFLINE"
 
         return (
             f"Cloud reasoning: ENABLED\n"
+            f"  Network: {net}\n"
+            f"  Cloud-first: {'ON — cloud primary, local fallback' if self.cloud_first else 'OFF — selective routing'}\n"
             f"  Anthropic: {has_a} | Default: {self.default_anthropic}\n"
             f"    Balance: ${bal_a:.2f} remaining (${spent_a:.2f} spent)\n"
             f"  OpenAI:    {has_o} | Default: {self.default_openai}\n"

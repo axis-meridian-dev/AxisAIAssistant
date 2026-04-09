@@ -389,12 +389,15 @@ class Agent:
 
         # ── Step 2: Check cloud routing ───────────────────────────────
         use_cloud = self.cloud.should_use_cloud(user_input, intent, self.current_mode)
+        online = self.cloud.is_online if self.cloud.enabled else False
+        net_tag = "online" if online else "offline"
         if use_cloud:
-            print(f"  [Routing] → CLOUD ({self.cloud.provider})", flush=True)
-            self._verbose_log.append(f"Routing → CLOUD ({self.cloud.provider})")
+            print(f"  [Routing] → CLOUD ({self.cloud.provider}) [{net_tag}]", flush=True)
+            self._verbose_log.append(f"Routing → CLOUD ({self.cloud.provider}) [{net_tag}]")
         else:
-            print(f"  [Routing] → LOCAL (Ollama)", flush=True)
-            self._verbose_log.append("Routing → LOCAL (Ollama)")
+            reason = "offline fallback" if (self.cloud.enabled and not online) else "local preferred"
+            print(f"  [Routing] → LOCAL (Ollama) [{reason}]", flush=True)
+            self._verbose_log.append(f"Routing → LOCAL (Ollama) [{reason}]")
         
         # ── Step 3: Local tool calling phase ──────────────────────────
         # Always use local model for tool calls — it's fast and good at routing

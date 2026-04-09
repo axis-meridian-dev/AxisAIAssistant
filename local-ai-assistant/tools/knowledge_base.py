@@ -326,10 +326,26 @@ def _merge_chunks(sections: list[str], chunk_size: int, overlap: int) -> list[st
 
 
 def file_hash(path: Path) -> str:
-    """Quick hash of file for change detection."""
-    stat = path.stat()
-    key = f"{path}:{stat.st_size}:{stat.st_mtime}"
-    return hashlib.md5(key.encode()).hexdigest()
+    """Content-based hash for reliable duplicate detection.
+
+    Reads first + last 8 KB of the file and hashes them with SHA-256.
+    Falls back to stat-based hash for very large or unreadable files.
+    """
+    try:
+        size = path.stat().st_size
+        h = hashlib.sha256()
+        h.update(str(size).encode())
+        with open(path, "rb") as f:
+            head = f.read(8192)
+            h.update(head)
+            if size > 16384:
+                f.seek(-8192, 2)
+                h.update(f.read(8192))
+        return h.hexdigest()[:32]
+    except Exception:
+        stat = path.stat()
+        key = f"{path}:{stat.st_size}:{stat.st_mtime}"
+        return hashlib.md5(key.encode()).hexdigest()
 
 
 # ── Knowledge Base Tool ─────────────────────────────────────────────────────
@@ -592,9 +608,21 @@ class KnowledgeBaseTool(BaseTool):
         fhash = file_hash(filepath)
         str_path = str(filepath)
 
-        # Remove old version if exists
+        # Skip if already ingested at this path and unchanged
         if str_path in self.manifest["files"]:
+            if self.manifest["files"][str_path]["hash"] == fhash:
+                return f"Already ingested (unchanged): {filepath.name}"
+            # File changed — remove old chunks and re-ingest
             self._remove_file_chunks(str_path)
+
+        # Cross-path duplicate: same content already ingested from a different path
+        else:
+            seen_hashes = {info["hash"] for info in self.manifest["files"].values()}
+            if fhash in seen_hashes:
+                existing = next(
+                    (p for p, info in self.manifest["files"].items() if info["hash"] == fhash), "?"
+                )
+                return f"Duplicate content — already ingested as: {existing}"
 
         # Detect document type and extract metadata (same as ingest_directory)
         doc_type = detect_document_type(content, filepath)

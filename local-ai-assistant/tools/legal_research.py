@@ -118,14 +118,14 @@ CT_STATUTES = {
 
 
 class LegalResearchTool(BaseTool):
-    
+
     def __init__(self, config: dict):
         super().__init__(config)
         self.data_dir = Path(config.get("legal", {}).get(
             "data_dir", str(LEGAL_DATA_DIR)
         ))
         self.data_dir.mkdir(parents=True, exist_ok=True)
-        
+
         # Subdirectories
         (self.data_dir / "federal_statutes").mkdir(exist_ok=True)
         (self.data_dir / "state_statutes").mkdir(exist_ok=True)
@@ -133,7 +133,7 @@ class LegalResearchTool(BaseTool):
         (self.data_dir / "statistics").mkdir(exist_ok=True)
         (self.data_dir / "news_clips").mkdir(exist_ok=True)
         (self.data_dir / "research_briefs").mkdir(exist_ok=True)
-        
+
         self.client = httpx.Client(
             headers={
                 "User-Agent": "Mozilla/5.0 (X11; Linux x86_64; rv:120.0) Gecko/20100101 Firefox/120.0"
@@ -141,9 +141,48 @@ class LegalResearchTool(BaseTool):
             follow_redirects=True,
             timeout=30
         )
-        
+
+        # Download manifest — tracks URLs and file hashes to prevent duplicates
+        self._manifest_path = self.data_dir / ".download_manifest.json"
+        self._manifest = self._load_manifest()
+
         # Shared web search tool instance (lazy-loaded)
         self._web_search = None
+
+    def _load_manifest(self) -> dict:
+        """Load the download manifest that tracks all fetched URLs and files."""
+        if self._manifest_path.exists():
+            try:
+                with open(self._manifest_path) as f:
+                    return json.load(f)
+            except (json.JSONDecodeError, OSError):
+                pass
+        return {"urls": {}, "files": {}}
+
+    def _save_manifest(self):
+        with open(self._manifest_path, "w") as f:
+            json.dump(self._manifest, f, indent=2)
+
+    def _is_duplicate_url(self, url: str) -> tuple[bool, str | None]:
+        """Check if a URL has already been downloaded. Returns (is_dup, existing_path)."""
+        normalized = url.rstrip("/").lower()
+        entry = self._manifest["urls"].get(normalized)
+        if entry and Path(entry["path"]).exists():
+            return True, entry["path"]
+        return False, None
+
+    def _record_download(self, url: str, save_path: str):
+        """Record a URL → file mapping in the download manifest."""
+        normalized = url.rstrip("/").lower()
+        self._manifest["urls"][normalized] = {
+            "path": save_path,
+            "downloaded": datetime.now().isoformat(),
+        }
+        self._manifest["files"][save_path] = {
+            "url": url,
+            "downloaded": datetime.now().isoformat(),
+        }
+        self._save_manifest()
     
     @property
     def web_search(self):
@@ -189,13 +228,30 @@ class LegalResearchTool(BaseTool):
     def _fetch_federal_statute(self, title: str, section: str) -> str:
         """Fetch a specific section of the US Code from Cornell LII."""
         url = f"https://www.law.cornell.edu/uscode/text/{title}/{section}"
-        
+
+        # Check if already downloaded
+        save_path = self.data_dir / "federal_statutes" / f"{title}_USC_{section}.txt"
+        is_dup, existing = self._is_duplicate_url(url)
+        if is_dup or save_path.exists():
+            path = existing or str(save_path)
+            try:
+                text = Path(path).read_text()[:8000]
+                return (
+                    f"**{title} USC § {section}** (already downloaded)\n"
+                    f"Source: {url}\n"
+                    f"{'─' * 60}\n\n"
+                    f"{text}\n\n"
+                    f"File: {path}"
+                )
+            except OSError:
+                pass  # File gone — re-download
+
         try:
             response = self.client.get(url)
-            
+
             if response.status_code == 404:
                 return f"Statute not found: {title} USC § {section}. Try searching instead."
-            
+
             response.raise_for_status()
             soup = BeautifulSoup(response.text, "lxml")
             
@@ -224,7 +280,9 @@ class LegalResearchTool(BaseTool):
                     f.write(f"# Source: {url}\n")
                     f.write(f"# Retrieved: {datetime.now().isoformat()}\n\n")
                     f.write(text)
-                
+
+                self._record_download(url, str(save_path))
+
                 result = (
                     f"**{heading_text}**\n"
                     f"Source: {url}\n"
@@ -246,8 +304,25 @@ class LegalResearchTool(BaseTool):
         if not sec_id.startswith("sec_"):
             sec_id = f"sec_{sec_id}"
 
-        # Try direct CGA URL (e.g., https://www.cga.ct.gov/current/pub/sec_53a-22.htm)
         url = f"https://www.cga.ct.gov/current/pub/{sec_id}.htm"
+
+        # Check if already downloaded
+        safe_sec = section.replace("-", "_").replace(".", "_")
+        save_path = self.data_dir / "state_statutes" / "connecticut" / f"CGS_{safe_sec}.txt"
+        is_dup, existing = self._is_duplicate_url(url)
+        if is_dup or save_path.exists():
+            path = existing or str(save_path)
+            try:
+                text = Path(path).read_text()[:8000]
+                return (
+                    f"**CGS § {section}** (already downloaded)\n"
+                    f"Source: {url}\n"
+                    f"{'─' * 60}\n\n"
+                    f"{text}\n\n"
+                    f"File: {path}"
+                )
+            except OSError:
+                pass
 
         try:
             response = self.client.get(url)
@@ -277,14 +352,14 @@ class LegalResearchTool(BaseTool):
                     text = text[:8000] + "\n\n... [truncated — full text saved to file]"
 
                 # Save locally
-                safe_sec = section.replace("-", "_").replace(".", "_")
-                save_path = self.data_dir / "state_statutes" / "connecticut" / f"CGS_{safe_sec}.txt"
                 save_path.parent.mkdir(parents=True, exist_ok=True)
                 with open(save_path, "w") as f:
                     f.write(f"# {heading_text}\n")
                     f.write(f"# Source: {url}\n")
                     f.write(f"# Retrieved: {datetime.now().isoformat()}\n\n")
                     f.write(text)
+
+                self._record_download(url, str(save_path))
 
                 return (
                     f"**{heading_text}**\n"
@@ -380,6 +455,15 @@ class LegalResearchTool(BaseTool):
     
     def fetch_court_opinion(self, url: str) -> str:
         """Fetch and save the full text of a court opinion."""
+        # Check if already downloaded
+        is_dup, existing = self._is_duplicate_url(url)
+        if is_dup:
+            try:
+                text = Path(existing).read_text()[:10000]
+                return f"Opinion already downloaded: {existing}\n\n{text}"
+            except OSError:
+                pass
+
         try:
             response = self.client.get(url)
             response.raise_for_status()
@@ -406,15 +490,17 @@ class LegalResearchTool(BaseTool):
             # Save locally
             safe_name = re.sub(r'[^\w\-]', '_', url.split("/")[-2] or "opinion")[:80]
             save_path = self.data_dir / "case_law" / f"{safe_name}.txt"
-            
+
             with open(save_path, "w") as f:
                 f.write(f"# Source: {url}\n")
                 f.write(f"# Retrieved: {datetime.now().isoformat()}\n\n")
                 f.write(text)
-            
+
+            self._record_download(url, str(save_path))
+
             if len(text) > 10000:
                 text = text[:10000] + "\n\n... [full text saved to file]"
-            
+
             return f"Opinion saved to: {save_path}\n\n{text}"
             
         except Exception as e:
@@ -453,15 +539,24 @@ class LegalResearchTool(BaseTool):
         Download a document (PDF, HTML, text) from a URL and save it
         to the legal research directory.
         """
+        # Check if already downloaded
+        is_dup, existing = self._is_duplicate_url(url)
+        if is_dup:
+            return (
+                f"Already downloaded: {existing}\n"
+                f"Source: {url}\n\n"
+                f"Use the existing file or delete it first to re-download."
+            )
+
         valid_categories = [
             "federal_statutes", "state_statutes", "case_law",
             "statistics", "news_clips", "research_briefs"
         ]
         if category not in valid_categories:
             category = "research_briefs"
-        
+
         save_dir = self.data_dir / category
-        
+
         try:
             response = self.client.get(url)
             response.raise_for_status()
@@ -504,6 +599,8 @@ class LegalResearchTool(BaseTool):
                     f.write(f"# Downloaded: {datetime.now().isoformat()}\n\n")
                     f.write("\n".join(lines))
             
+            self._record_download(url, str(save_path))
+
             size = save_path.stat().st_size
             return (
                 f"Downloaded: {save_path}\n"
@@ -545,6 +642,14 @@ class LegalResearchTool(BaseTool):
         Save a news article to the local research library.
         Extracts clean text and stores with metadata.
         """
+        # Check if already clipped
+        is_dup, existing = self._is_duplicate_url(url)
+        if is_dup:
+            return (
+                f"Article already clipped: {existing}\n"
+                f"Source: {url}"
+            )
+
         try:
             response = self.client.get(url)
             response.raise_for_status()
@@ -594,6 +699,8 @@ class LegalResearchTool(BaseTool):
                 f.write(f"\n{'─' * 60}\n\n")
                 f.write(text)
             
+            self._record_download(url, str(save_path))
+
             return (
                 f"Article clipped: {title}\n"
                 f"Saved to: {save_path}\n"

@@ -664,12 +664,134 @@ def knowledge_stats():
     a = get_agent()
     if "knowledge_base" in a.tool_instances:
         kb = a.tool_instances["knowledge_base"]
+        files = kb.manifest.get("files", {})
+        home = str(Path.home())
+
+        # Breakdown by doc type via manifest file extensions
+        ext_counts = {}
+        total_size = 0
+        for path, info in files.items():
+            ext = Path(path).suffix.lower() or "(no ext)"
+            ext_counts[ext] = ext_counts.get(ext, 0) + 1
+            total_size += info.get("size", 0)
+
+        # Top directories
+        dir_counts = {}
+        for path in files:
+            rel = path.replace(home, "~")
+            parts = Path(rel).parts
+            top_dir = "/".join(parts[:3]) if len(parts) > 2 else "/".join(parts[:2])
+            dir_counts[top_dir] = dir_counts.get(top_dir, 0) + 1
+
         return jsonify({
             "total_files": kb.manifest["stats"].get("total_files", 0),
             "total_chunks": kb.manifest["stats"].get("total_chunks", 0),
+            "total_size": total_size,
             "db_path": str(kb.db_path),
+            "by_extension": ext_counts,
+            "by_directory": dict(sorted(dir_counts.items(), key=lambda x: -x[1])[:15]),
         })
-    return jsonify({"total_files": 0, "total_chunks": 0, "db_path": "not loaded"})
+    return jsonify({"total_files": 0, "total_chunks": 0, "db_path": "not loaded",
+                     "total_size": 0, "by_extension": {}, "by_directory": {}})
+
+
+@app.route("/api/knowledge/sources", methods=["GET"])
+@require_auth
+def knowledge_sources():
+    """List all ingested sources with metadata."""
+    a = get_agent()
+    if "knowledge_base" not in a.tool_instances:
+        return jsonify({"sources": []})
+
+    kb = a.tool_instances["knowledge_base"]
+    files = kb.manifest.get("files", {})
+    home = str(Path.home())
+    q = request.args.get("q", "").lower()
+
+    sources = []
+    for path, info in sorted(files.items()):
+        if q and q not in path.lower():
+            continue
+        sources.append({
+            "path": path,
+            "display": path.replace(home, "~"),
+            "filename": Path(path).name,
+            "extension": Path(path).suffix,
+            "chunks": info.get("chunks", 0),
+            "size": info.get("size", 0),
+            "ingested_at": info.get("ingested_at", ""),
+            "hash": info.get("hash", ""),
+        })
+
+    return jsonify({"sources": sources, "total": len(sources)})
+
+
+@app.route("/api/knowledge/search", methods=["POST"])
+@require_auth
+def knowledge_search():
+    """Search the knowledge base."""
+    a = get_agent()
+    if "knowledge_base" not in a.tool_instances:
+        return jsonify({"error": "Knowledge base not loaded"}), 400
+
+    kb = a.tool_instances["knowledge_base"]
+    data = request.get_json(silent=True) or {}
+    query = data.get("query", "").strip()
+    if not query:
+        return jsonify({"error": "No query provided"}), 400
+
+    max_results = min(data.get("max_results", 10), 20)
+    filters = {}
+    for key in ("filter_doc_type", "filter_topic", "filter_jurisdiction"):
+        if data.get(key):
+            filters[key] = data[key]
+
+    result_text = kb.query_knowledge(query, max_results=max_results, **filters)
+    return jsonify({"query": query, "results": result_text})
+
+
+@app.route("/api/knowledge/ingest", methods=["POST"])
+@require_auth
+def knowledge_ingest():
+    """Ingest a file or directory into the knowledge base."""
+    a = get_agent()
+    if "knowledge_base" not in a.tool_instances:
+        return jsonify({"error": "Knowledge base not loaded"}), 400
+
+    kb = a.tool_instances["knowledge_base"]
+    data = request.get_json(silent=True) or {}
+    path = data.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    target = Path(path).expanduser().resolve()
+    if target.is_file():
+        result = kb.ingest_file(str(target))
+    elif target.is_dir():
+        file_types = data.get("file_types", "all")
+        result = kb.ingest_directory(str(target), recursive=True, file_types=file_types)
+    else:
+        return jsonify({"error": f"Path not found: {path}"}), 404
+
+    return jsonify({"result": result})
+
+
+@app.route("/api/knowledge/remove", methods=["POST"])
+@require_auth
+def knowledge_remove():
+    """Remove a source from the knowledge base."""
+    a = get_agent()
+    if "knowledge_base" not in a.tool_instances:
+        return jsonify({"error": "Knowledge base not loaded"}), 400
+
+    kb = a.tool_instances["knowledge_base"]
+    data = request.get_json(silent=True) or {}
+    path = data.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    result = kb.remove_source(path)
+    return jsonify({"result": result})
 
 
 @app.route("/api/legal/files", methods=["GET"])
@@ -679,18 +801,79 @@ def legal_files():
     if not legal_dir.exists():
         return jsonify({"categories": {}})
 
+    q = request.args.get("q", "").lower()
     categories = {}
+
     for d in sorted(legal_dir.iterdir()):
-        if d.is_dir():
-            files = sorted(d.glob("*"))
-            files = [f for f in files if f.is_file()]
+        if d.is_dir() and d.name != "projects" and not d.name.startswith("."):
+            all_files = sorted(d.rglob("*"))
+            all_files = [f for f in all_files if f.is_file() and not f.name.startswith(".")]
+            if q:
+                all_files = [f for f in all_files if q in f.name.lower()]
+
             categories[d.name] = [{
                 "name": f.name,
+                "path": str(f),
                 "size": f.stat().st_size,
                 "modified": datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
-            } for f in files[:50]]
+                "relative": str(f.relative_to(d)),
+            } for f in all_files[:100]]
 
     return jsonify({"categories": categories})
+
+
+@app.route("/api/legal/read", methods=["POST"])
+@require_auth
+def legal_read():
+    """Read the content of a legal research file."""
+    data = request.get_json(silent=True) or {}
+    path = data.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    filepath = Path(path)
+    legal_dir = Path.home() / "LegalResearch"
+
+    # Security: only allow reading files under LegalResearch
+    try:
+        filepath.resolve().relative_to(legal_dir.resolve())
+    except ValueError:
+        return jsonify({"error": "Access denied"}), 403
+
+    if not filepath.exists() or not filepath.is_file():
+        return jsonify({"error": "File not found"}), 404
+
+    try:
+        if filepath.suffix.lower() == ".pdf":
+            return jsonify({"content": "(PDF file — view in a PDF reader)", "path": str(filepath)})
+        text = filepath.read_text(encoding="utf-8", errors="replace")[:50000]
+        return jsonify({"content": text, "path": str(filepath)})
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+@app.route("/api/legal/delete", methods=["POST"])
+@require_auth
+def legal_delete():
+    """Delete a legal research file."""
+    data = request.get_json(silent=True) or {}
+    path = data.get("path", "").strip()
+    if not path:
+        return jsonify({"error": "No path provided"}), 400
+
+    filepath = Path(path)
+    legal_dir = Path.home() / "LegalResearch"
+
+    try:
+        filepath.resolve().relative_to(legal_dir.resolve())
+    except ValueError:
+        return jsonify({"error": "Access denied"}), 403
+
+    if not filepath.exists():
+        return jsonify({"error": "File not found"}), 404
+
+    filepath.unlink()
+    return jsonify({"success": True, "deleted": str(filepath)})
 
 
 @app.route("/api/chat/clear", methods=["POST"])
