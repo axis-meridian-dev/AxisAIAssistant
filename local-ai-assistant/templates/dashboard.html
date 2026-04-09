@@ -212,6 +212,29 @@ body {
 .stat-fill.warn { background: var(--yellow); }
 .stat-fill.danger { background: var(--red); }
 
+/* Verbose toggle switch */
+.verbose-toggle { position: relative; display: inline-block; width: 32px; height: 16px; }
+.verbose-toggle input { opacity: 0; width: 0; height: 0; }
+.verbose-slider {
+    position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0;
+    background: var(--bg-tertiary); border-radius: 8px; transition: 0.3s;
+}
+.verbose-slider:before {
+    content: ""; position: absolute; height: 12px; width: 12px; left: 2px; bottom: 2px;
+    background: var(--text-dim); border-radius: 50%; transition: 0.3s;
+}
+.verbose-toggle input:checked + .verbose-slider { background: var(--accent); }
+.verbose-toggle input:checked + .verbose-slider:before { transform: translateX(16px); background: var(--bg-primary); }
+
+/* Verbose output panel */
+.verbose-panel {
+    font-size: 11px; font-family: var(--font-mono); color: var(--text-dim);
+    background: var(--bg-tertiary); border-radius: 6px; padding: 8px 10px;
+    margin-top: 6px; max-height: 200px; overflow-y: auto; display: none;
+    border: 1px solid var(--border); white-space: pre-wrap; line-height: 1.4;
+}
+.verbose-panel.visible { display: block; }
+
 /* ── Main content ───────────────────────────────────────── */
 .main { flex: 1; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 .page { display: none; flex-direction: column; height: 100%; overflow: hidden; }
@@ -422,8 +445,19 @@ body {
         <div class="stat-bar"><div class="stat-fill good" id="cpu-bar" style="width:0%"></div></div>
         <div class="sys-stat"><span>RAM</span><span id="ram-pct">--</span></div>
         <div class="stat-bar"><div class="stat-fill good" id="ram-bar" style="width:0%"></div></div>
+        <div class="sys-stat"><span>Swap</span><span id="swap-pct">--</span></div>
+        <div class="stat-bar"><div class="stat-fill good" id="swap-bar" style="width:0%"></div></div>
         <div class="sys-stat"><span>GPU</span><span id="gpu-pct">--</span></div>
         <div class="stat-bar"><div class="stat-fill good" id="gpu-bar" style="width:0%"></div></div>
+        <div class="sys-stat"><span>Net &#8593;</span><span id="net-up">--</span></div>
+        <div class="sys-stat"><span>Net &#8595;</span><span id="net-down">--</span></div>
+        <div style="margin-top:8px;display:flex;justify-content:space-between;align-items:center;">
+            <span>Verbose</span>
+            <label class="verbose-toggle">
+                <input type="checkbox" id="verbose-toggle" onchange="toggleVerbose(this.checked)">
+                <span class="verbose-slider"></span>
+            </label>
+        </div>
     </div>
 </div>
 
@@ -740,7 +774,7 @@ async function sendMessage() {
         if (data.cloud_model) meta = data.cloud_model;
         if (data.response_time) meta += ` · ${data.response_time}s`;
 
-        addMessage('assistant', data.response || data.error, meta, data.response_time);
+        addMessage('assistant', data.response || data.error, meta, data.response_time, data.verbose);
 
         if (data.balances) updateBalanceDisplay(data.balances);
         if (data.history_truncated) showToast('Older messages trimmed to keep context manageable', 'warn');
@@ -754,7 +788,7 @@ async function sendMessage() {
     input.focus();
 }
 
-function addMessage(role, content, metaText, responseTime) {
+function addMessage(role, content, metaText, responseTime, verboseLog) {
     const container = document.getElementById('chat-messages');
     const div = document.createElement('div');
     div.className = `message ${role}`;
@@ -769,7 +803,13 @@ function addMessage(role, content, metaText, responseTime) {
     let meta = '';
     if (metaText) meta = `<div class="meta">${metaText}</div>`;
 
-    div.innerHTML = `<div class="avatar">${avatar}</div><div class="content">${escaped}${meta}</div>`;
+    let verbose = '';
+    if (role === 'assistant' && verboseLog && verboseLog.length > 0) {
+        const lines = verboseLog.map(l => escapeHtml(l)).join('\n');
+        verbose = `<div class="verbose-panel ${verboseEnabled ? 'visible' : ''}">${lines}</div>`;
+    }
+
+    div.innerHTML = `<div class="avatar">${avatar}</div><div class="content">${escaped}${meta}${verbose}</div>`;
     container.appendChild(div);
     container.scrollTop = container.scrollHeight;
 }
@@ -1066,6 +1106,15 @@ async function loadLegalFiles() {
 }
 
 // ── System Stats ──────────────────────────────────────────
+let _lastNet = null;
+let _lastNetTime = null;
+
+function formatBytes(b) {
+    if (b < 1024) return b + ' B/s';
+    if (b < 1048576) return (b/1024).toFixed(1) + ' KB/s';
+    return (b/1048576).toFixed(1) + ' MB/s';
+}
+
 async function updateSystemStats() {
     try {
         const info = await api('/api/system').then(r=>r.json());
@@ -1078,12 +1127,47 @@ async function updateSystemStats() {
         setBar('cpu-bar', info.cpu_percent);
         document.getElementById('ram-pct').textContent = info.ram.percent + '%';
         setBar('ram-bar', info.ram.percent);
+
+        // Swap
+        if (info.swap && info.swap.total > 0) {
+            document.getElementById('swap-pct').textContent = info.swap.percent + '%';
+            setBar('swap-bar', info.swap.percent);
+        } else {
+            document.getElementById('swap-pct').textContent = 'N/A';
+        }
+
+        // GPU
         if (info.gpu) {
             const gpuPct = Math.round(info.gpu.vram_used_mb / info.gpu.vram_total_mb * 100);
             document.getElementById('gpu-pct').textContent = `${info.gpu.vram_used_mb}/${info.gpu.vram_total_mb}MB`;
             setBar('gpu-bar', gpuPct);
         } else { document.getElementById('gpu-pct').textContent = 'N/A'; }
+
+        // Network (rate calculation)
+        if (info.network) {
+            const now = Date.now();
+            if (_lastNet && _lastNetTime) {
+                const dt = (now - _lastNetTime) / 1000;
+                if (dt > 0) {
+                    const upRate = (info.network.bytes_sent - _lastNet.bytes_sent) / dt;
+                    const downRate = (info.network.bytes_recv - _lastNet.bytes_recv) / dt;
+                    document.getElementById('net-up').textContent = formatBytes(Math.max(0, upRate));
+                    document.getElementById('net-down').textContent = formatBytes(Math.max(0, downRate));
+                }
+            }
+            _lastNet = info.network;
+            _lastNetTime = now;
+        }
     } catch(e) {}
+}
+
+// ── Verbose Toggle ───────────────────────────────────────
+let verboseEnabled = false;
+function toggleVerbose(on) {
+    verboseEnabled = on;
+    document.querySelectorAll('.verbose-panel').forEach(el => {
+        el.classList.toggle('visible', on);
+    });
 }
 
 // ── Init ──────────────────────────────────────────────────

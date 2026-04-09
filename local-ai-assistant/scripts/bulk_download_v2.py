@@ -393,7 +393,7 @@ def download_ct_court_rules():
 def ingest_all():
     info("═══ INGESTING INTO KNOWLEDGE BASE ═══")
     try:
-        sys.path.insert(0, str(Path(__file__).parent))
+        sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
         from config import load_config
         from tools.knowledge_base import KnowledgeBaseTool
         

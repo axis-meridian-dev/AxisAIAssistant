@@ -206,6 +206,7 @@ def chat():
         "balances": balances,
         "monthly_spend": round(monthly_spend, 4),
         "history_truncated": getattr(a, '_history_truncated', False),
+        "verbose": getattr(a, '_verbose_log', []),
     })
 
 
@@ -623,6 +624,18 @@ def system_info():
         "cpu_percent": psutil.cpu_percent(interval=0.5),
         "cpu_count": psutil.cpu_count(),
     }
+
+    # Network I/O
+    try:
+        net = psutil.net_io_counters()
+        info["network"] = {
+            "bytes_sent": net.bytes_sent,
+            "bytes_recv": net.bytes_recv,
+            "packets_sent": net.packets_sent,
+            "packets_recv": net.packets_recv,
+        }
+    except Exception:
+        info["network"] = None
 
     try:
         result = subprocess.run(

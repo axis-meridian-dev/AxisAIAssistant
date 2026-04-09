@@ -143,11 +143,54 @@ def compute_confidence(response_text, intent):
     return "Low", reasons
 
 
-def validate_and_patch(response_text, intent, mode):
+def validate_and_patch(response_text, intent, mode, tool_results=None):
     if intent not in ("legal", "legal_adjacent"):
         return response_text
     patched = False
-    
+
+    # Patch: warn if no tools were used for a legal query
+    if not tool_results:
+        if "[UNVERIFIED]" not in response_text and "no sources were retrieved" not in response_text.lower():
+            response_text = (
+                "**WARNING: No legal research tools were called for this query. "
+                "All citations below are unverified and may be inaccurate. "
+                "Ask me to look up specific statutes or search case law for grounded results.**\n\n"
+                + response_text
+            )
+            patched = True
+
+    # Patch: cross-check cited statutes against tool results
+    if tool_results:
+        tool_text = "\n".join(tool_results).lower()
+
+        # Find statutes cited in response
+        cited_federal = re.findall(r'(\d+)\s*U\.?S\.?C\.?\s*§?\s*(\d+\w*)', response_text)
+        cited_ct = re.findall(r'(?:CGS|CT Gen\.? Stat\.?|Conn\.? Gen\.? Stat\.?|§)\s*([\d]+[a-z]?[-–]\d+\w*)', response_text, re.IGNORECASE)
+
+        unverified = []
+        for title, sec in cited_federal:
+            # Check if this statute appeared in tool output
+            patterns = [f"{title} usc § {sec}", f"{title} u.s.c. § {sec}",
+                        f"text/{title}/{sec}", f"{title}_usc_{sec}"]
+            if not any(p in tool_text for p in patterns):
+                unverified.append(f"{title} USC § {sec}")
+
+        for sec in cited_ct:
+            patterns = [sec.lower(), sec.replace("-", "_").lower(), f"sec_{sec.lower()}"]
+            if not any(p in tool_text for p in patterns):
+                unverified.append(f"CGS § {sec}")
+
+        if unverified:
+            warning = (
+                f"\n\n**CITATION VERIFICATION WARNING:** The following citations were NOT found in the "
+                f"retrieved research data and may need independent verification:\n"
+            )
+            for u in unverified[:10]:  # Cap at 10
+                warning += f"- {u}\n"
+            warning += "Run `lookup_statute` on these to verify they exist and are correctly cited.\n"
+            response_text += warning
+            patched = True
+
     # Patch: confidence scoring
     if "CONFIDENCE:" not in response_text:
         confidence, reasons = compute_confidence(response_text, intent)
@@ -155,12 +198,12 @@ def validate_and_patch(response_text, intent, mode):
         for r in reasons: block += f"- {r}\n"
         response_text += block
         patched = True
-    
+
     # Patch: disclaimer
     if "not legal advice" not in response_text.lower():
         response_text += "\n\nNote: This is AI-generated legal research, not legal advice. Verify all citations independently."
         patched = True
-    
+
     if patched:
         print("  [Validator] Auto-patched response", flush=True)
     return response_text
@@ -169,17 +212,23 @@ def validate_and_patch(response_text, intent, mode):
 # ── Prompt Templates ────────────────────────────────────────────────────────
 
 CLOUD_LEGAL_PROMPT = """You are a legal research assistant analyzing Connecticut criminal defense cases.
-You have access to local research data including CT General Statutes, federal statutes, case law from CourtListener, 
+You have access to local research data including CT General Statutes, federal statutes, case law from CourtListener,
 and the user's personal case files stored in ~/LegalResearch/.
 
-RULES:
-1. ALWAYS cite specific statutes (e.g., CGS § 53a-22, 42 U.S.C. § 1983) and cases (e.g., Graham v. Connor, 490 U.S. 386 (1989))
-2. Structure every legal response with: APPLICABLE LAW, CASE LAW, APPLICATION/ANALYSIS sections
-3. When analyzing a CT case, always reference both federal constitutional protections AND Connecticut's Article I, § 7 (which provides broader protections)
-4. End with CONFIDENCE scoring and a disclaimer that this is research, not legal advice
-5. Be direct, thorough, and adversarial on behalf of the defendant — identify every weakness in the state's case
-6. Reference the CT Police Accountability Act (PA 20-1) when use of force is at issue
-7. When writing legal documents, use proper legal formatting and citation style
+CRITICAL ANTI-HALLUCINATION RULES:
+1. ONLY cite statutes and cases that appear in the [Research Data] provided below. Do NOT fabricate citations from memory.
+2. If the research data does not contain a specific statute or case, you MUST say "I could not find [X] in the available data — please run a search for it" instead of guessing.
+3. If no research data was provided (no tool results), you MUST state: "No sources were retrieved for this query. The following is based on general knowledge and MUST be independently verified." Then prefix any citation with [UNVERIFIED].
+4. Never invent statute section numbers. If you know a statute exists but don't have the exact text, say "see [statute name] (exact section number needs verification)".
+5. For case law, always include the citation (volume, reporter, page, year) ONLY if it appeared in the research data. Otherwise mark as [UNVERIFIED].
+
+RESPONSE RULES:
+6. Structure every legal response with: APPLICABLE LAW, CASE LAW, APPLICATION/ANALYSIS sections
+7. When analyzing a CT case, always reference both federal constitutional protections AND Connecticut's Article I, § 7 (which provides broader protections)
+8. End with CONFIDENCE scoring and a disclaimer that this is research, not legal advice
+9. Be direct, thorough, and adversarial on behalf of the defendant — identify every weakness in the state's case
+10. Reference the CT Police Accountability Act (PA 20-1) when use of force is at issue
+11. When writing legal documents, use proper legal formatting and citation style
 
 The user is a defendant in Connecticut with active court cases. He has a public defender who has not been filing motions.
 He is building his own legal research to bring to counsel. Treat every query with the seriousness it deserves."""
@@ -209,11 +258,15 @@ You have these tools:
 
 Think step by step about which tools to use, then use them."""
 
+LEGAL_TOOL_ENFORCEMENT = """
+
+MANDATORY FOR ALL LEGAL QUESTIONS: You MUST call at least one research tool (lookup_statute, search_case_law, query_knowledge, or search_legal_news) BEFORE providing your answer. NEVER answer a legal question from memory alone — always retrieve sources first. If you are unsure which tool to use, call search_case_law with the topic, then lookup_statute for any relevant statutes."""
+
 LEGAL_PROMPT_SUFFIX = {
-    "analysis": "\n\nYou MUST structure your response with: APPLICABLE LAW, CASE LAW, APPLICATION, CONFIDENCE sections.",
-    "research": "\n\nRESEARCH MODE: Return ONLY raw sources. No interpretation. STATUTES, CASES, DATA, SOURCES.",
-    "argument": "\n\nARGUMENT MODE: Build BOTH sides. PLAINTIFF/PROSECUTION arguments + DEFENSE arguments, each with citations. Then STRONGEST ARGUMENT.",
-    "writing": "\n\nWRITING MODE: Produce a complete, well-structured legal document. Include SOURCES section.",
+    "analysis": LEGAL_TOOL_ENFORCEMENT + "\n\nYou MUST structure your response with: APPLICABLE LAW, CASE LAW, APPLICATION, CONFIDENCE sections.",
+    "research": LEGAL_TOOL_ENFORCEMENT + "\n\nRESEARCH MODE: Return ONLY raw sources. No interpretation. STATUTES, CASES, DATA, SOURCES.",
+    "argument": LEGAL_TOOL_ENFORCEMENT + "\n\nARGUMENT MODE: Build BOTH sides. PLAINTIFF/PROSECUTION arguments + DEFENSE arguments, each with citations. Then STRONGEST ARGUMENT.",
+    "writing": LEGAL_TOOL_ENFORCEMENT + "\n\nWRITING MODE: Produce a complete, well-structured legal document. Include SOURCES section.",
 }
 
 
@@ -320,7 +373,8 @@ class Agent:
         """Process user input through the hybrid agent loop."""
         
         self.history.append({"role": "user", "content": user_input})
-        
+        self._verbose_log = []
+
         # ── Step 1: Intent + Mode ─────────────────────────────────────
         intent = detect_intent(user_input)
         
@@ -331,18 +385,22 @@ class Agent:
                 print(f"  [Mode] {legal_mode}", flush=True)
         
         print(f"  [Intent: {intent} | Mode: {self.current_mode}]", flush=True)
-        
+        self._verbose_log.append(f"Intent: {intent} | Mode: {self.current_mode}")
+
         # ── Step 2: Check cloud routing ───────────────────────────────
         use_cloud = self.cloud.should_use_cloud(user_input, intent, self.current_mode)
         if use_cloud:
             print(f"  [Routing] → CLOUD ({self.cloud.provider})", flush=True)
+            self._verbose_log.append(f"Routing → CLOUD ({self.cloud.provider})")
         else:
             print(f"  [Routing] → LOCAL (Ollama)", flush=True)
+            self._verbose_log.append("Routing → LOCAL (Ollama)")
         
         # ── Step 3: Local tool calling phase ──────────────────────────
         # Always use local model for tool calls — it's fast and good at routing
         model = self.config["llm"]["primary_model"]
         print(f"  [Tools Model: {model}]", flush=True)
+        self._verbose_log.append(f"Tools Model: {model}")
         
         tool_prompt = LOCAL_SYSTEM_PROMPT
         if intent in ("legal", "legal_adjacent"):
@@ -386,6 +444,7 @@ class Agent:
                     if len(args_preview) > 150:
                         args_preview = args_preview[:150] + "..."
                     print(f"    → {func_name}({args_preview})", flush=True)
+                    self._verbose_log.append(f"Tool call: {func_name}({args_preview})")
                     
                     handler = self.tool_handlers.get(func_name)
                     if handler:
@@ -414,6 +473,7 @@ class Agent:
                 # ── Step 4: Final response ────────────────────────────
                 local_response = msg.get("content", "")
                 print(f"  [Local] Got response ({len(local_response)} chars)", flush=True)
+                self._verbose_log.append(f"Local response: {len(local_response)} chars")
                 
                 # ── Step 5: Cloud reasoning (if enabled) ──────────────
                 if use_cloud and self.cloud.enabled:
@@ -434,14 +494,17 @@ class Agent:
                     if cloud_response:
                         final = cloud_response
                         print(f"  [Cloud] Using cloud response ({len(final)} chars)", flush=True)
+                        self._verbose_log.append(f"Cloud response ({selected_model}): {len(final)} chars")
                     else:
                         final = local_response
                         print(f"  [Cloud] Failed — falling back to local", flush=True)
+                        self._verbose_log.append("Cloud failed — fallback to local")
                 else:
                     final = local_response
                 
                 # ── Step 6: Validate and patch ────────────────────────
-                final = validate_and_patch(final, intent, self.current_mode)
+                final = validate_and_patch(final, intent, self.current_mode,
+                                           tool_results=tool_results_collected or None)
                 
                 self.history.append({"role": "assistant", "content": final})
 

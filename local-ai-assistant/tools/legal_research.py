@@ -240,13 +240,66 @@ class LegalResearchTool(BaseTool):
             return f"Error fetching statute: {e}\nURL: {url}"
     
     def _fetch_ct_statute(self, section: str) -> str:
-        """Fetch a Connecticut statute."""
-        # Try the CT legislature search
-        url = f"https://www.cga.ct.gov/current/pub/chap_000.htm"
-        search_url = f"https://search.cga.state.ct.us/r/statute/dtsearch_form.asp"
-        
-        # Use web search as primary method since CT doesn't have a clean API
-        return self._search_statutes_online(f"Connecticut General Statutes section {section}")
+        """Fetch a Connecticut statute by section number (e.g., '53a-22', '46a-58')."""
+        # Normalize: "53a-22" → "sec_53a-22"
+        sec_id = section.strip().lower()
+        if not sec_id.startswith("sec_"):
+            sec_id = f"sec_{sec_id}"
+
+        # Try direct CGA URL (e.g., https://www.cga.ct.gov/current/pub/sec_53a-22.htm)
+        url = f"https://www.cga.ct.gov/current/pub/{sec_id}.htm"
+
+        try:
+            response = self.client.get(url)
+
+            if response.status_code == 200:
+                soup = BeautifulSoup(response.text, "lxml")
+
+                # Extract heading
+                heading = soup.find("h1") or soup.find("h2")
+                heading_text = heading.get_text(strip=True) if heading else f"CGS § {section}"
+
+                # Extract statute content
+                content_div = (
+                    soup.find("div", id="content") or
+                    soup.find("main") or
+                    soup.find("article") or
+                    soup
+                )
+                for tag in content_div(["script", "style", "nav", "footer", "header"]):
+                    tag.decompose()
+
+                text = content_div.get_text(separator="\n", strip=True)
+                lines = [l.strip() for l in text.split("\n") if l.strip()]
+                text = "\n".join(lines)
+
+                if len(text) > 8000:
+                    text = text[:8000] + "\n\n... [truncated — full text saved to file]"
+
+                # Save locally
+                safe_sec = section.replace("-", "_").replace(".", "_")
+                save_path = self.data_dir / "state_statutes" / "connecticut" / f"CGS_{safe_sec}.txt"
+                save_path.parent.mkdir(parents=True, exist_ok=True)
+                with open(save_path, "w") as f:
+                    f.write(f"# {heading_text}\n")
+                    f.write(f"# Source: {url}\n")
+                    f.write(f"# Retrieved: {datetime.now().isoformat()}\n\n")
+                    f.write(text)
+
+                return (
+                    f"**{heading_text}**\n"
+                    f"Source: {url}\n"
+                    f"{'─' * 60}\n\n"
+                    f"{text}\n\n"
+                    f"Saved to: {save_path}"
+                )
+
+            # If direct URL fails, try the search
+            return self._search_statutes_online(f"Connecticut General Statutes section {section}")
+
+        except Exception as e:
+            # Fallback to web search
+            return self._search_statutes_online(f"Connecticut General Statutes section {section}")
     
     def _search_statutes_online(self, query: str) -> str:
         """Search for statutes using web search."""
